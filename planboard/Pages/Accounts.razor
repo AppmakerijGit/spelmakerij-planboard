@@ -1,0 +1,417 @@
+@page "/accounts"
+@attribute [Authorize(Roles = "admin")]
+@inject AccountService AccountService
+@inject SlotTimesService SlotTimesService
+@inject BuilderService BuilderService
+@inject ModalService Modal
+@inject ToastService Toast
+
+<PageTitle>Accounts</PageTitle>
+
+<div class="screen active">
+    <div class="accounts-wrap">
+        <!-- Left panel -->
+        <div class="accounts-left">
+            <div class="accounts-search-wrap">
+                <svg class="accounts-search-icon" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input class="accounts-search" type="text" placeholder="Zoeken..."
+                       @bind="_search" @bind:event="oninput" />
+            </div>
+            <div class="role-chips">
+                @foreach (var f in new[] { ("alle", "Alle"), ("deelnemer", "Deelnemers"), ("admin", "Admins"), ("vrijwilliger", "Vrijwilligers") })
+                {
+                    var filter = f.Item1;
+                    var label = f.Item2;
+                    <button class="role-chip @(_filter == filter ? "active" : "")"
+                            type="button" @onclick="() => _filter = filter">@label</button>
+                }
+            </div>
+            <button class="new-account-btn" type="button" @onclick="OpenNewAccountModal">+ Nieuw account</button>
+            <div class="accounts-grid">
+                @if (FilteredAccounts.Any())
+                {
+                    @foreach (var account in FilteredAccounts)
+                    {
+                        var acc = account;
+                        <div class="account-card @(_selectedId == acc.Id ? "selected" : "")"
+                             @onclick="() => SelectAccount(acc.Id)">
+                            <div class="account-avatar">@acc.Initials</div>
+                            <div class="account-info">
+                                <div class="account-name">@acc.Name</div>
+                                <span class="account-role-tag @acc.Role">@acc.Role</span>
+                            </div>
+                            <div class="account-status @(acc.Active ? "active" : "inactive")"></div>
+                            <div class="account-actions">
+                                <button class="acc-btn delete" type="button"
+                                        title="Verwijder account"
+                                        @onclick="() => DeleteAccount(acc.Id)"
+                                        @onclick:stopPropagation>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path d="M19 6l-1 14H6L5 6"></path>
+                                        <path d="M10 11v6"></path><path d="M14 11v6"></path>
+                                        <path d="M9 6V4h6v2"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    }
+                }
+                else
+                {
+                    <div class="accounts-empty">Geen accounts gevonden</div>
+                }
+            </div>
+        </div>
+
+        <!-- Detail panel -->
+        <div class="account-detail @(_selectedAccount is not null ? "visible" : "")">
+            @if (_selectedAccount is { } sel)
+            {
+                <div class="detail-avatar">@sel.Initials</div>
+                <div class="detail-divider"></div>
+                <label class="detail-label">Naam</label>
+                <input class="detail-input" type="text" @bind="_editName" />
+                <label class="detail-label">Rol</label>
+                <select class="detail-input" @bind="_editRole">
+                    <option value="deelnemer">Deelnemer</option>
+                    <option value="admin">Admin</option>
+                    <option value="vrijwilliger">Vrijwilliger</option>
+                </select>
+                <label class="detail-label">Wachtwoord</label>
+                <input class="detail-input" type="password" @bind="_editPassword" placeholder="Leeg = ongewijzigd..." />
+                <div class="detail-row" style="margin-top:8px">
+                    <span class="detail-label">Status</span>
+                    <button class="detail-status-toggle @(sel.Active ? "active" : "inactive")"
+                            type="button" @onclick="ToggleStatus">
+                        @(sel.Active ? "Actief" : "Inactief")
+                    </button>
+                </div>
+                <label class="detail-label" style="margin-top:12px">Beschikbaarheid</label>
+                <div class="availability-days">
+                    @foreach (var day in new[] { ("monday", "Ma"), ("tuesday", "Di"), ("wednesday", "Wo"), ("thursday", "Do"), ("friday", "Vr") })
+                    {
+                        var key = day.Item1;
+                        var label = day.Item2;
+                        <div class="availability-day-col">
+                            <div class="availability-day-label">@label</div>
+                            @for (int i = 0; i < _slotTimes.Count; i++)
+                            {
+                                var slotIdx = i;
+                                var slots = _editSlotAvailability.TryGetValue(key, out var s) ? s : null;
+                                var isOn = slots is not null && slots[slotIdx];
+                                <button class="avail-slot-btn @(isOn ? "on" : "off")"
+                                        type="button"
+                                        @onclick="() => ToggleSlotAvailability(key, slotIdx)"
+                                        @onclick:preventDefault>
+                                    <span class="avail-slot-time">@_slotTimes[slotIdx].TimeRange</span>
+                                    <span class="avail-slot-period">@_slotTimes[slotIdx].PeriodLabel</span>
+                                </button>
+                            }
+                        </div>
+                    }
+                </div>
+                @if (sel.Role == "deelnemer")
+                {
+                    <label class="detail-label">Exclusiviteit</label>
+                    <div class="exclusivity-chips">
+                        @foreach (var partnerId in sel.ExclusiveWith)
+                        {
+                            var partner = _accounts.FirstOrDefault(a => a.Id == partnerId);
+                            if (partner is null) continue;
+                            var pid = partnerId;
+                            <span class="exclusivity-chip">
+                                @partner.Name
+                                <button type="button" class="exclusivity-chip-remove"
+                                        @onclick="() => RemoveExclusivityPair(sel.Id, pid)"
+                                        aria-label="Verwijder exclusiviteit met @partner.Name">×</button>
+                            </span>
+                        }
+                        @if (!sel.ExclusiveWith.Any())
+                        {
+                            <span style="font-size:0.8rem;color:var(--text-muted,#888)">Geen</span>
+                        }
+                    </div>
+                    @if (_accounts.Any(a => a.Role == "deelnemer" && a.Active && a.Id != sel.Id && !sel.ExclusiveWith.Contains(a.Id)))
+                    {
+                        var exclusivityCandidates = _accounts.Where(a => a.Role == "deelnemer" && a.Active && a.Id != sel.Id && !sel.ExclusiveWith.Contains(a.Id)).ToList();
+                        var listId = $"exclusivity-list-{sel.Id}";
+                        <input class="detail-input" type="text" placeholder="+ Toevoegen..."
+                               list="@listId"
+                               value="@_exclusivitySearch"
+                               @oninput="async e => {
+                                   _exclusivitySearch = e.Value?.ToString() ?? string.Empty;
+                                   var match = exclusivityCandidates.FirstOrDefault(a => a.Name.Equals(_exclusivitySearch, StringComparison.OrdinalIgnoreCase));
+                                   if (match is not null) {
+                                       _newExclusivePartnerId = match.Id.ToString();
+                                       _exclusivitySearch = string.Empty;
+                                       await AddExclusivityPair(sel.Id);
+                                   }
+                               }" />
+                        <datalist id="@listId">
+                            @foreach (var partner in exclusivityCandidates)
+                            {
+                                <option value="@partner.Name"></option>
+                            }
+                        </datalist>
+                    }
+                    <label class="detail-label">Verboden locaties</label>
+                    <div class="exclusivity-chips">
+                        @foreach (var locationId in sel.LocationRestrictions)
+                        {
+                            var loc = _builderData?.Locaties.FirstOrDefault(l => l.Id == locationId);
+                            if (loc is null) continue;
+                            var lid = locationId;
+                            <span class="exclusivity-chip">
+                                @loc.Name
+                                <button type="button" class="exclusivity-chip-remove"
+                                        @onclick="() => RemoveLocationRestriction(sel.Id, lid)"
+                                        aria-label="Verwijder locatiebeperking voor @loc.Name">×</button>
+                            </span>
+                        }
+                        @if (!sel.LocationRestrictions.Any())
+                        {
+                            <span style="font-size:0.8rem;color:var(--text-muted,#888)">Geen</span>
+                        }
+                    </div>
+                    @if (_builderData?.Locaties.Any(l => !sel.LocationRestrictions.Contains(l.Id)) == true)
+                    {
+                        var locationCandidates = _builderData!.Locaties.Where(l => !sel.LocationRestrictions.Contains(l.Id)).ToList();
+                        var locListId = $"location-restriction-list-{sel.Id}";
+                        <input class="detail-input" type="text" placeholder="+ Locatie toevoegen..."
+                               list="@locListId"
+                               value="@_locationRestrictionSearch"
+                               @oninput="async e => {
+                                   _locationRestrictionSearch = e.Value?.ToString() ?? string.Empty;
+                                   var match = locationCandidates.FirstOrDefault(l => l.Name.Equals(_locationRestrictionSearch, StringComparison.OrdinalIgnoreCase));
+                                   if (match is not null) {
+                                       _locationRestrictionSearch = string.Empty;
+                                       await AddLocationRestriction(sel.Id, match.Id);
+                                   }
+                               }" />
+                        <datalist id="@locListId">
+                            @foreach (var loc in locationCandidates)
+                            {
+                                <option value="@loc.Name"></option>
+                            }
+                        </datalist>
+                    }
+                }
+                <div class="detail-actions">
+                    <button class="detail-save-btn" type="button" @onclick="SaveAccount">Opslaan</button>
+                    <button class="detail-delete-btn" type="button" @onclick="() => DeleteAccount(sel.Id)">Verwijderen</button>
+                </div>
+            }
+            else
+            {
+                <div class="accounts-empty">Selecteer een account</div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<Account> _accounts = [];
+    private int? _selectedId;
+    private string _filter = "alle";
+    private string _search = "";
+    private string _editName = "";
+    private string _editRole = "deelnemer";
+    private string _editEmail = "";
+    private string _editPassword = "";
+    private string _newPassword = "";
+    private string _newRole = "deelnemer";
+    private string _newExclusivePartnerId = "";
+    private string _exclusivitySearch = "";
+    private BuilderData? _builderData;
+    private string _locationRestrictionSearch = "";
+    private List<SlotTime> _slotTimes = [];
+    private Dictionary<string, bool[]> _editSlotAvailability = DefaultSlotAvailability();
+
+    private static Dictionary<string, bool[]> DefaultSlotAvailability() => new()
+    {
+        ["monday"] = [true, true, true, true],
+        ["tuesday"] = [true, true, true, true],
+        ["wednesday"] = [true, true, true, true],
+        ["thursday"] = [true, true, true, true],
+        ["friday"] = [true, true, true, true],
+    };
+
+    private Account? _selectedAccount => _accounts.FirstOrDefault(a => a.Id == _selectedId);
+
+    private IEnumerable<Account> FilteredAccounts => _accounts.Where(a =>
+        (_filter == "alle" || a.Role == _filter) &&
+        (string.IsNullOrEmpty(_search) || a.Name.Contains(_search, StringComparison.OrdinalIgnoreCase)));
+
+    protected override async Task OnInitializedAsync()
+    {
+        var builderTask = BuilderService.GetBuilderData();
+        var accountsTask = AccountService.GetAccounts();
+        var slotTimesTask = SlotTimesService.GetSlotTimes();
+        _accounts = await accountsTask;
+        _slotTimes = await slotTimesTask;
+        _builderData = await builderTask;
+    }
+
+    private void SelectAccount(int id)
+    {
+        _selectedId = id;
+        var acc = _selectedAccount!;
+        _editName = acc.Name;
+        _editRole = acc.Role;
+        _editEmail = acc.Email ?? "";
+        _editPassword = "";
+        _exclusivitySearch = "";
+        _locationRestrictionSearch = "";
+        _editSlotAvailability = DefaultSlotAvailability();
+        if (acc.SlotAvailability is not null)
+        {
+            foreach (var (day, slots) in acc.SlotAvailability)
+            {
+                if (slots?.Length == 4)
+                    _editSlotAvailability[day] = [.. slots];
+            }
+        }
+    }
+
+    private void OpenNewAccountModal()
+    {
+        _newPassword = "";
+        _newRole = "deelnemer";
+        Modal.Open(new ModalOptions(
+            Title: "Nieuw account",
+            Placeholder: "Naam...",
+            ConfirmLabel: "Aanmaken",
+            Extra: BuildNewAccountExtra(),
+            OnConfirm: async name =>
+            {
+                if (string.IsNullOrWhiteSpace(name)) { Toast.Show("Vul een naam in"); return; }
+                if (string.IsNullOrWhiteSpace(_newPassword)) { Toast.Show("Vul een wachtwoord in"); return; }
+                var initials = MakeInitials(name);
+                var account = new Account { Name = name, Username = name, Initials = initials, Role = _newRole, Password = _newPassword };
+                var created = await AccountService.CreateAccount(account);
+                _accounts.Add(created);
+                Modal.Close();
+                Toast.Show("Account aangemaakt");
+                StateHasChanged();
+            }
+        ));
+    }
+
+    private RenderFragment BuildNewAccountExtra() => __builder =>
+    {
+        <select class="modal-input" @bind="_newRole">
+            <option value="deelnemer">Deelnemer</option>
+            <option value="admin">Admin</option>
+            <option value="vrijwilliger">Vrijwilliger</option>
+        </select>
+        <input class="modal-input" type="password" placeholder="Wachtwoord..."
+               @bind="_newPassword" />
+    };
+
+    private void ToggleSlotAvailability(string day, int slotIdx)
+    {
+        if (_editSlotAvailability.TryGetValue(day, out var slots))
+            slots[slotIdx] = !slots[slotIdx];
+        StateHasChanged();
+    }
+
+    private async Task SaveAccount()
+    {
+        if (_selectedAccount is null) return;
+        if (string.IsNullOrWhiteSpace(_editName)) { Toast.Show("Vul een naam in"); return; }
+        _selectedAccount.Name = _editName;
+        _selectedAccount.Role = _editRole;
+        _selectedAccount.Initials = MakeInitials(_editName);
+        if (!string.IsNullOrEmpty(_editPassword))
+            _selectedAccount.Password = _editPassword;
+        await AccountService.UpdateAccount(_selectedAccount);
+        var dayAvailability = _editSlotAvailability.ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.Any(v => v)
+        );
+        await AccountService.SaveAvailability(_selectedAccount.Id, dayAvailability, _editSlotAvailability);
+        _selectedAccount.Availability = dayAvailability;
+        _selectedAccount.SlotAvailability = _editSlotAvailability.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray());
+        var idx = _accounts.FindIndex(a => a.Id == _selectedAccount.Id);
+        if (idx >= 0) _accounts[idx] = _selectedAccount;
+        Toast.Show("Account bijgewerkt");
+    }
+
+    private async Task ToggleStatus()
+    {
+        if (_selectedAccount is null) return;
+        _selectedAccount.Active = !_selectedAccount.Active;
+        await AccountService.UpdateAccount(_selectedAccount);
+        StateHasChanged();
+    }
+
+    private async Task AddExclusivityPair(int accountId)
+    {
+        if (!int.TryParse(_newExclusivePartnerId, out var partnerId) || partnerId == 0) return;
+        await AccountService.AddExclusivity(accountId, partnerId);
+
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        var partner = _accounts.FirstOrDefault(a => a.Id == partnerId);
+        if (account is not null && !account.ExclusiveWith.Contains(partnerId))
+            account.ExclusiveWith.Add(partnerId);
+        if (partner is not null && !partner.ExclusiveWith.Contains(accountId))
+            partner.ExclusiveWith.Add(accountId);
+
+        _newExclusivePartnerId = "";
+        StateHasChanged();
+    }
+
+    private async Task RemoveExclusivityPair(int accountId, int partnerId)
+    {
+        await AccountService.RemoveExclusivity(accountId, partnerId);
+
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        var partner = _accounts.FirstOrDefault(a => a.Id == partnerId);
+        account?.ExclusiveWith.Remove(partnerId);
+        partner?.ExclusiveWith.Remove(accountId);
+
+        StateHasChanged();
+    }
+
+    private async Task AddLocationRestriction(int accountId, int locationId)
+    {
+        await AccountService.AddLocationRestriction(accountId, locationId);
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        if (account is not null && !account.LocationRestrictions.Contains(locationId))
+            account.LocationRestrictions.Add(locationId);
+        _locationRestrictionSearch = "";
+        StateHasChanged();
+    }
+
+    private async Task RemoveLocationRestriction(int accountId, int locationId)
+    {
+        await AccountService.RemoveLocationRestriction(accountId, locationId);
+        _accounts.FirstOrDefault(a => a.Id == accountId)?.LocationRestrictions.Remove(locationId);
+        StateHasChanged();
+    }
+
+    private async Task DeleteAccount(int id)
+    {
+        await AccountService.DeleteAccount(id);
+        _accounts.RemoveAll(a => a.Id == id);
+        if (_selectedId == id) _selectedId = null;
+        Toast.Show("Account verwijderd");
+        StateHasChanged();
+    }
+
+    private static string MakeInitials(string name)
+    {
+        var trimmed = name.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return "";
+        var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var initials = parts.Length > 1
+            ? string.Concat(parts.Select(w => w[0]))
+            : trimmed;
+        return initials.ToUpper()[..Math.Min(2, initials.Length)];
+    }
+}

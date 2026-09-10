@@ -1,0 +1,333 @@
+@page "/home"
+@attribute [Authorize(Roles = "deelnemer,vrijwilliger")]
+@inject CardService Cards
+@inject AbsenceService AbsenceService
+@inject AuthService Auth
+@inject ModalService Modal
+@inject ToastService Toast
+
+<PageTitle>Home</PageTitle>
+
+<div class="screen active">
+    <div class="home-wrap">
+        <div class="agenda-week-nav" aria-label="Week overzicht">
+            <button class="week-nav-btn" type="button"
+                    disabled="@(!CanGoBack)"
+                    @onclick="() => NavigateWeek(-1)" title="Vorige week">
+                ←
+            </button>
+            @foreach (var day in GetCurrentWeekDays())
+            {
+                var isSelected = day == _selectedDate;
+                var isToday = day == DateOnly.FromDateTime(DateTime.Today);
+
+                <button class="week-day-btn @(isSelected ? "active" : "") @(isToday ? "today" : "")"
+                        type="button"
+                        @onclick="() => SelectDay(day)">
+                    <span class="day-name">@FormatDayName(day)</span>
+                    <span class="day-number">@day.Day</span>
+                </button>
+            }
+            <button class="week-nav-btn" type="button"
+                    disabled="@(!CanGoForward)"
+                    @onclick="() => NavigateWeek(1)" title="Volgende week">
+                →
+            </button>
+        </div>
+
+        <div class="filter-bar">
+            <label class="only-me-toggle">
+                <input type="checkbox" @bind="_onlyMe" />
+                <span class="toggle-label">Alleen ik</span>
+            </label>
+        </div>
+        <div class="home-tab-view">
+            <div class="time-tabs">
+                @for (int i = 0; i < Slots.Length; i++)
+                {
+                    var idx = i;
+                    <button class="time-tab @(idx == _activeTab ? "active" : "")"
+                            type="button" @onclick="() => _activeTab = idx">
+                        <div class="t-times">@Slots[idx].Time.Replace(" - ", "\n")</div>
+                        <div class="t-period">@Slots[idx].Period</div>
+                        <div class="ball-wrap"><div class="ball-track"><div class="ball"></div></div></div>
+                    </button>
+                }
+            </div>
+            <div class="cards-container">
+                @{ var activeItems = FilteredSlots(_activeTab); }
+                @if (activeItems.Any())
+                {
+                    @foreach (var card in activeItems)
+                    {
+                        <ActivityCard Card="@card" HomeLayout="true" CurrentUserName="@Auth.CurrentUser?.Name" />
+                    }
+                }
+                else
+                {
+                    <div class="cards-empty">@( _onlyMe ? "Je hebt geen activiteiten gepland voor dit tijdslot" : "Geen activiteiten gepland voor dit tijdslot")</div>
+                }
+            </div>
+        </div>
+        <div class="home-columns">
+            @for (int i = 0; i < Slots.Length; i++)
+            {
+                var idx = i;
+                <div class="home-col">
+                    <div class="col-header">
+                        <div class="ch-time">@Slots[idx].Time</div>
+                        <div class="ch-period">@Slots[idx].Period</div>
+                        <div class="ch-line"></div>
+                    </div>
+                    <div class="cards-container">
+                        @{ var colItems = FilteredSlots(idx); }
+                        @if (colItems.Any())
+                        {
+                            @foreach (var card in colItems)
+                            {
+                                <ActivityCard Card="@card" HomeLayout="true" CurrentUserName="@Auth.CurrentUser?.Name" />
+                            }
+                        }
+                        else
+                        {
+                            <div class="cards-empty">@( _onlyMe ? "Geen eigen activiteiten" : "Geen activiteiten gepland")</div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+    @if (_myAbsence is not null)
+    {
+        <button class="absent-btn beter-btn" type="button" @onclick="OpenBeterModal">Beter melden</button>
+    }
+    else
+    {
+        <button class="absent-btn" type="button" @onclick="OpenAbsenceModal">Absentie melden</button>
+    }
+</div>
+
+@code {
+    private static readonly (string Time, string Period)[] Slots =
+    [
+        ("10:00 - 11:00", "ochtend 1"),
+        ("11:30 - 12:15", "ochtend 2"),
+        ("13:00 - 14:00", "middag 1"),
+        ("14:30 - 15:30", "middag 2")
+    ];
+
+    private List<List<SlotCard>> _slots = [];
+    private Absence? _myAbsence;
+    private bool _onlyMe;
+    private int _activeTab;
+    private DateOnly _selectedDate = DateOnly.FromDateTime(DateTime.Today);
+    private DateOnly _currentWeekStart;
+    private DateOnly _nextWeekStart;
+    private string _absType = "ziek";
+    private DateOnly? _absFrom;
+    private DateOnly? _absTo;
+    private string _absReason = "";
+
+    private bool CanGoBack => WeekStartOf(_selectedDate) > _currentWeekStart;
+    private bool CanGoForward => WeekStartOf(_selectedDate) < _nextWeekStart;
+
+    private static DateOnly WeekStartOf(DateOnly date)
+    {
+        int diff = (7 + (date.DayOfWeek - DayOfWeek.Monday)) % 7;
+        return date.AddDays(-diff);
+    }
+
+    private string DateKey => _selectedDate.ToString("yyyy-MM-dd");
+
+    private IEnumerable<SlotCard> FilteredSlots(int slotIdx)
+    {
+        if (_slots.Count <= slotIdx) return Enumerable.Empty<SlotCard>();
+        var items = _slots[slotIdx];
+        if (!_onlyMe) return items;
+
+        var name = Auth.CurrentUser?.Name;
+        if (string.IsNullOrWhiteSpace(name)) return items;
+
+        return items.Where(c =>
+            c.Clients.Any(cl => string.Equals(cl, name, StringComparison.OrdinalIgnoreCase)) ||
+            c.Supers.Any(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _currentWeekStart = WeekStartOf(today);
+        _nextWeekStart = _currentWeekStart.AddDays(7);
+        await LoadDay();
+    }
+
+    private async Task LoadDay()
+    {
+        _slots = await Cards.GetCards(DateKey);
+        await LoadMyAbsence();
+    }
+
+    private async Task LoadMyAbsence()
+    {
+        var name = Auth.CurrentUser?.Name;
+        if (string.IsNullOrWhiteSpace(name)) { _myAbsence = null; return; }
+
+        var absences = await AbsenceService.GetAbsences(DateKey);
+        _myAbsence = absences.FirstOrDefault(a =>
+            string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task SelectDay(DateOnly day)
+    {
+        _selectedDate = day;
+        await LoadDay();
+    }
+
+    private async Task NavigateWeek(int offset)
+    {
+        var candidate = _selectedDate.AddDays(offset * 7);
+        var candidateWeek = WeekStartOf(candidate);
+        if (candidateWeek < _currentWeekStart || candidateWeek > _nextWeekStart)
+            return;
+        _selectedDate = candidate;
+        await LoadDay();
+    }
+
+    private IEnumerable<DateOnly> GetCurrentWeekDays()
+    {
+        var startOfWeek = WeekStartOf(_selectedDate);
+        for (int i = 0; i < 5; i++)
+        {
+            yield return startOfWeek.AddDays(i);
+        }
+    }
+
+    private string FormatDayName(DateOnly date)
+    {
+        var days = new[] { "Zo", "Ma", "Di", "Wo", "Do", "Vr", "Za" };
+        return days[(int)date.DayOfWeek];
+    }
+
+    private async Task JumpPublishedDay(int direction)
+    {
+        for (var offset = 1; offset <= 30; offset++)
+        {
+            var candidate = _selectedDate.AddDays(direction * offset);
+            var plan = await Cards.GetDayPlan(candidate.ToString("yyyy-MM-dd"));
+            var slots = plan.Slots ?? EmptySlots();
+            if (plan.PublishedAt is not null && slots.Any(slot => slot.Any()))
+            {
+                _selectedDate = candidate;
+                _slots = slots;
+                _activeTab = 0;
+                return;
+            }
+        }
+
+        Toast.Show("Geen gepubliceerde planning gevonden");
+    }
+
+    private void OpenAbsenceModal()
+    {
+        _absType = "ziek";
+        _absFrom = DateOnly.FromDateTime(DateTime.Today);
+        _absTo = DateOnly.FromDateTime(DateTime.Today);
+        _absReason = "";
+
+        Modal.Open(new ModalOptions(
+            Title: "Absentie melden",
+            HideInput: true,
+            ConfirmLabel: "Melden",
+            InitialValue: Auth.CurrentUser?.Name ?? "",
+            Extra: BuildAbsenceExtra(),
+            OnConfirm: async _ =>
+            {
+                var name = Auth.CurrentUser?.Name;
+                if (string.IsNullOrWhiteSpace(name)) { Toast.Show("Niet ingelogd"); return; }
+                
+                if (_absFrom is null || _absTo is null)
+                { Toast.Show("Vul een periode in"); return; }
+                
+                if (_absFrom < DateOnly.FromDateTime(DateTime.Today))
+                { Toast.Show("Absentie in het verleden is niet toegestaan"); return; }
+                
+                if (_absTo < _absFrom)
+                { Toast.Show("Einddatum kan niet voor startdatum liggen"); return; }
+
+                var absence = new Absence
+                {
+                    Name = name,
+                    Date = DateTime.Today.ToString("yyyy-MM-dd"),
+                    Type = _absType,
+                    FromDate = _absFrom?.ToString("yyyy-MM-dd"),
+                    ToDate = _absTo?.ToString("yyyy-MM-dd"),
+                    Reason = _absReason
+                };
+                await AbsenceService.ReportAbsence(absence);
+                Modal.Close();
+                Toast.Show("Absentie opgeslagen");
+                await LoadMyAbsence();
+                StateHasChanged();
+            }
+        ));
+    }
+
+    private void OpenBeterModal()
+    {
+        if (_myAbsence is null) return;
+
+        Modal.Open(new ModalOptions(
+            Title: "Beter melden",
+            HideInput: true,
+            ConfirmLabel: "Beter melden",
+            Extra: BuildBeterExtra(),
+            OnConfirm: async _ =>
+            {
+                if (_myAbsence is null) { Modal.Close(); return; }
+                await AbsenceService.DeleteAbsence(_myAbsence.Id);
+                Modal.Close();
+                Toast.Show("Je bent weer aanwezig gemeld");
+                await LoadMyAbsence();
+                StateHasChanged();
+            }
+        ));
+    }
+
+    private RenderFragment BuildBeterExtra() => __builder =>
+    {
+        <div class="modal-user-info">Je meldt jezelf weer aanwezig vanaf nu.</div>
+    };
+
+    private RenderFragment BuildAbsenceExtra() => __builder =>
+    {
+        <div class="modal-user-info">Absentie voor: <strong>@Auth.CurrentUser?.Name</strong></div>
+        <select class="modal-select" @bind="_absType">
+            <option value="ziek">Ziek</option>
+            <option value="vakantie">Vakantie</option>
+            <option value="anders">Anders</option>
+        </select>
+        <div class="abs-date-row">
+            <div class="abs-date-group">
+                <label>Van</label>
+                <input type="date" class="modal-input abs-date-input" @bind="_absFrom" min="@DateTime.Today.ToString("yyyy-MM-dd")" />
+            </div>
+            <div class="abs-date-group">
+                <label>Tot</label>
+                <input type="date" class="modal-input abs-date-input" @bind="_absTo" min="@(_absFrom?.ToString("yyyy-MM-dd") ?? DateTime.Today.ToString("yyyy-MM-dd"))" />
+            </div>
+        </div>
+        <textarea class="modal-input abs-reason-textarea" @bind="_absReason"
+                  placeholder="Notities..." rows="3"></textarea>
+    };
+
+    private static string FormatDate(string key)
+    {
+        var days = new[] { "zo", "ma", "di", "wo", "do", "vr", "za" };
+        var months = new[] { "jan","feb","mrt","apr","mei","jun","jul","aug","sep","okt","nov","dec" };
+        var date = DateOnly.Parse(key);
+        return $"{days[(int)date.DayOfWeek]} {date.Day} {months[date.Month - 1]}";
+    }
+
+    private static List<List<SlotCard>> EmptySlots() =>
+        Enumerable.Range(0, Slots.Length).Select(_ => new List<SlotCard>()).ToList();
+}

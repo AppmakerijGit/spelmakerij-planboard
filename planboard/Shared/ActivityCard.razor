@@ -1,0 +1,98 @@
+@* Shared/ActivityCard.razor *@
+@if (HomeLayout)
+{
+    <div class="activity-card activity-card--home">
+        <div class="card-location">@Card.Location</div>
+        <div class="card-home-cols">
+            <div class="card-home-col">
+                <span class="card-section-label">spel</span>
+                <div class="card-tags">
+                    <TagPill Label="@Card.Title" Type="game" />
+                </div>
+            </div>
+            <div class="card-home-col">
+                <span class="card-section-label">client</span>
+                <div class="card-tags">
+                    @foreach (var client in Card.Clients)
+                    {
+                        <TagPill Label="@client" Type="deelnemer" IsCurrentUser="@IsCurrentUser(client)" />
+                    }
+                </div>
+            </div>
+            <div class="card-home-col">
+                <span class="card-section-label">begeleider</span>
+                <div class="card-tags">
+                    @foreach (var sup in Card.Supers)
+                    {
+                        <TagPill Label="@sup.Name" Type="@sup.Type" />
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    <div class="activity-card @(ShowSupervisorColumn ? "activity-card--split" : "")">
+        <div class="card-main">
+            @if (ShowLocation)
+            {
+                <div class="card-location">@Card.Location</div>
+                <div class="card-divider-left"></div>
+            }
+            @if (ShowSupervisorsAtTop && Card.Supers.Any())
+            {
+                <div class="card-tags">
+                    @foreach (var sup in Card.Supers)
+                    {
+                        <TagPill Label="@sup.Name" Type="@sup.Type" />
+                    }
+                </div>
+                <div class="card-divider-left"></div>
+            }
+            <div class="card-tags">
+                <TagPill Label="@Card.Title" Type="game" />
+            </div>
+            <div class="card-divider-left"></div>
+            <div class="card-tags">
+                @foreach (var client in Card.Clients)
+                {
+                    <TagPill Label="@client" Type="deelnemer" IsCurrentUser="@IsCurrentUser(client)" />
+                }
+            </div>
+            @if (!ShowSupervisorColumn && !ShowSupervisorsAtTop && Card.Supers.Any())
+            {
+                <div class="card-divider-left"></div>
+                <div class="card-tags">
+                    @foreach (var sup in Card.Supers)
+                    {
+                        <TagPill Label="@sup.Name" Type="@sup.Type" />
+                    }
+                </div>
+            }
+        </div>
+        @if (ShowSupervisorColumn)
+        {
+            <div class="card-sup-col">
+                <span class="card-section-label">begeleiders</span>
+                @foreach (var sup in Card.Supers)
+                {
+                    <TagPill Label="@sup.Name" Type="@sup.Type" />
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public SlotCard Card { get; set; } = new();
+    [Parameter] public bool ShowSupervisorColumn { get; set; } = true;
+    [Parameter] public bool ShowLocation { get; set; } = true;
+    [Parameter] public bool ShowSupervisorsAtTop { get; set; } = false;
+    [Parameter] public bool HomeLayout { get; set; } = false;
+    [Parameter] public string? CurrentUserName { get; set; }
+
+    private bool IsCurrentUser(string name) =>
+        !string.IsNullOrWhiteSpace(CurrentUserName)
+        && string.Equals(CurrentUserName, name, StringComparison.OrdinalIgnoreCase);
+}

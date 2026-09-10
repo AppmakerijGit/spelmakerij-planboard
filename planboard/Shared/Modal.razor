@@ -1,0 +1,58 @@
+@* Shared/Modal.razor *@
+@inject ModalService ModalService
+@implements IDisposable
+
+@if (ModalService.IsOpen && ModalService.Options is { } opts)
+{
+    <div class="modal-bg open" aria-hidden="false">
+        <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <h3 id="modalTitle">@opts.Title</h3>
+            @if (!opts.HideInput)
+            {
+                <input class="modal-input" @bind="_value" placeholder="@opts.Placeholder" />
+            }
+            @if (opts.Extra is not null)
+            {
+                <div>@opts.Extra</div>
+            }
+            <div class="modal-footer">
+                @if (!opts.HideCancel)
+                {
+                    <button class="mbtn cancel" type="button" @onclick="Cancel">Annuleren</button>
+                }
+                @if (opts.FooterExtra is not null)
+                {
+                    @opts.FooterExtra
+                }
+                <button class="mbtn confirm" type="button" @onclick="Confirm">@opts.ConfirmLabel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private string _value = "";
+
+    protected override void OnParametersSet()
+    {
+        _value = ModalService.Options?.InitialValue ?? "";
+    }
+
+    protected override void OnInitialized() => ModalService.OnChange += OnServiceChange;
+
+    private void OnServiceChange()
+    {
+        _value = ModalService.Options?.InitialValue ?? "";
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void Cancel() => ModalService.Close();
+
+    private async Task Confirm()
+    {
+        if (ModalService.Options?.OnConfirm is { } cb)
+            await cb(_value);
+    }
+
+    public void Dispose() => ModalService.OnChange -= OnServiceChange;
+}

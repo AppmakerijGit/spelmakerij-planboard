@@ -1,0 +1,38 @@
+CREATE TABLE IF NOT EXISTS users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  username VARCHAR(100) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  role ENUM('deelnemer', 'admin') NOT NULL,
+  initials VARCHAR(4) NOT NULL,
+  email VARCHAR(255),
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS day_plans (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  date DATE NOT NULL UNIQUE,
+  slots JSON NOT NULL,
+  published_at TIMESTAMP NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS absences (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(255) NOT NULL,
+  date DATE NOT NULL,
+  type ENUM('ziek', 'vakantie', 'anders') NOT NULL,
+  from_date DATE,
+  to_date DATE,
+  reason TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS builder_items (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  category ENUM('clienten', 'begeleiders', 'locaties', 'spellen') NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  type VARCHAR(50) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0
+);

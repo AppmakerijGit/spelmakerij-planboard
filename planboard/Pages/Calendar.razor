@@ -1,0 +1,1768 @@
+@page "/calendar"
+@attribute [Authorize(Roles = "admin")]
+@inject CardService Cards
+@inject BuilderService Builder
+@inject AbsenceService AbsenceService
+@inject AccountService AccountService
+@inject AuthService Auth
+@inject NavigationManager Nav
+@inject ToastService Toast
+@inject ModalService Modal
+@inject IJSRuntime JS
+@inject SlotTimesService SlotTimesService
+
+<PageTitle>Agenda</PageTitle>
+
+@if (_hoverTooltip is not null)
+{
+    <div class="badge-fixed-tooltip" style="left: @((int)_hoverTooltipX)px; top: @((int)_hoverTooltipY + 16)px">@_hoverTooltip</div>
+}
+
+<div class="screen active">
+    <div class="agenda-editor">
+        <div class="agenda-toolbar">
+            <div class="agenda-toolbar-left">
+                <span class="editor-mode-badge">Mode: Bewerken</span>
+                <div class="agenda-date-picker">
+                    <span aria-hidden="true">Cal</span>
+                    <input type="date" @bind="_selectedDate" @bind:after="LoadCards" aria-label="Kies planningsdatum" />
+                </div>
+                <button class="agenda-today-btn" type="button" @onclick="GoToToday" aria-label="Ga naar vandaag">Vandaag</button>
+                @if (_publishedAt is null)
+                {
+                    <span class="agenda-plan-indicator @(DayHasPlanning ? "has-plan" : "")">
+                        @(DayHasPlanning ? "Planning aanwezig" : "Nog geen planning")
+                    </span>
+                }
+                else
+                {
+                    <span class="agenda-plan-indicator published">
+                        Gepubliceerd
+                    </span>
+                }
+            </div>
+            <div class="agenda-toolbar-actions">
+                <button class="reorder-btn @(_isLocationReorderMode ? "active" : "")"
+                        type="button"
+                        disabled="@(_isSavingLocationOrder || LocationOrder.Count < 2)"
+                        @onclick="ToggleLocationReorderMode">
+                    @(_isLocationReorderMode ? "Ordenen annuleren" : "Locaties Ordenen")
+                </button>
+                @if (_isLocationReorderMode)
+                {
+                    <button class="reorder-save-btn"
+                            type="button"
+                            disabled="@(!HasLocationOrderChanges || _isSavingLocationOrder)"
+                            @onclick="SaveLocationOrder">
+                        @(_isSavingLocationOrder ? "Opslaan..." : "Opslaan als standaard")
+                    </button>
+                }
+                <button class="reorder-btn @(_isTimeEditMode ? "active" : "")"
+                        type="button"
+                        disabled="@(_isSavingSlotTimes)"
+                        @onclick="ToggleTimeEditMode">
+                    @(_isTimeEditMode ? "Bewerken annuleren" : "Tijden bewerken")
+                </button>
+                @if (_isTimeEditMode)
+                {
+                    <button class="reorder-save-btn"
+                            type="button"
+                            disabled="@_isSavingSlotTimes"
+                            @onclick="SaveSlotTimes">
+                        @(_isSavingSlotTimes ? "Opslaan..." : "Opslaan")
+                    </button>
+                }
+                @if (!_isLocationReorderMode && !_isTimeEditMode && !IsPastDay)
+                {
+                    <button class="publish-btn @(IsPlanningPublishable ? "ready" : "")"
+                            type="button"
+                            disabled="@(!IsPlanningPublishable)"
+                            @onclick="OpenPublishConfirmation">
+                        Publiceer
+                    </button>
+                }
+            </div>
+        </div>
+
+        <div class="agenda-week-nav" aria-label="Week overzicht">
+            <button class="week-nav-btn" type="button" @onclick="() => JumpDay(-7)" aria-label="Vorige week">←</button>
+            @foreach (var day in GetCurrentWeekDays())
+            {
+                var isSelected = day == _selectedDate;
+                var isToday = day == DateOnly.FromDateTime(DateTime.Today);
+                var status = _weekStatuses.FirstOrDefault(s => s.Date == day.ToString("yyyy-MM-dd"));
+                var hasPlanning = status?.HasPlanning ?? false;
+                var isPublished = status?.IsPublished ?? false;
+
+                <button class="week-day-btn @(isSelected ? "active" : "") @(isToday ? "today" : "") @(isPublished ? "published" : hasPlanning ? "has-planning" : "")"
+                        type="button"
+                        @onclick="() => SelectDay(day)">
+                    <span class="day-name">@FormatDayName(day)</span>
+                    <span class="day-number">@day.Day</span>
+                </button>
+            }
+            <button class="week-nav-btn" type="button" @onclick="() => JumpDay(7)" aria-label="Volgende week">→</button>
+        </div>
+
+
+        @if (AbsenceSummaries.Any())
+        {
+            <div class="absence-compact-row" aria-label="Compacte absentieweergave">
+                @foreach (var summary in AbsenceSummaries)
+                {
+                    <span class="absence-compact-badge @summary.Type" title="@summary.Names">@summary.Label</span>
+                }
+            </div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_validationMessage))
+        {
+            <div class="agenda-validation" role="alert">@_validationMessage</div>
+        }
+
+        <div class="agenda-body">
+            <aside class="expected-panel" aria-label="Verwachte deelnemers">
+                <div class="expected-panel-title">
+                    Verwachte deelnemers
+                    @if (_activeSlot != null)
+                    {
+                        <span class="active-slot-indicator">(@_slotTimes[_activeSlot.Value].PeriodLabel)</span>
+                    }
+                </div>
+                <section class="expected-location">
+                    <div class="expected-list">
+                        @foreach (var participant in ExpectedParticipants)
+                        {
+                            var pName = participant.Name;
+                            var pDragType = "client";
+                            var scheduled = _activeSlot != null
+                                ? IsParticipantScheduledInActiveSlot(participant.Name)
+                                : IsParticipantScheduledAnywhere(participant.Name);
+                            <span class="expected-person @(scheduled ? "scheduled" : "missing") @(IsOwnName(participant.Name) ? "own-name" : "")"
+                                  draggable="@(!IsPastDay ? "true" : "false")"
+                                  @ondragstart="() => StartPanelDrag(pDragType, pName)"
+                                  @ondragend="EndPanelDrag">
+                                @participant.Name
+                                @if (scheduled)
+                                {
+                                    <small>Ingepland</small>
+                                }
+                            </span>
+                        }
+                    </div>
+                </section>
+
+                <section class="expected-location">
+                    <div class="expected-panel-title">Verwachte begeleiders</div>
+                    <div class="expected-list">
+                        @foreach (var supervisor in AvailableSupervisors)
+                        {
+                            var sName = supervisor.Name;
+                            var sDragType = "supervisor";
+                            var scheduledSup = _activeSlot != null
+                                ? IsSupervisorScheduledAtTime(supervisor.Name, _activeSlot.Value)
+                                : IsSupervisorScheduledAnywhere(supervisor.Name);
+                            <span class="expected-person @(scheduledSup ? "scheduled" : "missing") @(IsOwnName(supervisor.Name) ? "own-name" : "")"
+                                  draggable="@(!IsPastDay ? "true" : "false")"
+                                  @ondragstart="() => StartPanelDrag(sDragType, sName)"
+                                  @ondragend="EndPanelDrag">
+                                @supervisor.Name
+                                @if (scheduledSup)
+                                {
+                                    <small>Ingepland</small>
+                                }
+                            </span>
+                        }
+                    </div>
+                </section>
+
+            </aside>
+
+            <div class="agenda-grid-wrap">
+                <div class="agenda-matrix">
+                    <div class="matrix-corner">
+                        <span>Locaties</span>
+                        <small>volgorde</small>
+                    </div>
+
+                    @for (int s = 0; s < _slotTimes.Count; s++)
+                    {
+                        var headerSlotIdx = s;
+                        <div class="matrix-time-header @(headerSlotIdx == _activeSlot ? "active" : "")" @onclick="() => { if (!_isTimeEditMode) SelectSlot(headerSlotIdx); }" style="cursor: @(_isTimeEditMode ? "default" : "pointer");">
+                            @if (_isTimeEditMode)
+                            {
+                                <input class="slot-edit-input" @bind="_slotTimes[headerSlotIdx].TimeRange" @onclick:stopPropagation />
+                                <input class="slot-edit-input period" @bind="_slotTimes[headerSlotIdx].PeriodLabel" @onclick:stopPropagation />
+                            }
+                            else
+                            {
+                                <div class="slot-cell-time" title="@_slotTimes[headerSlotIdx].TimeRange">@_slotTimes[headerSlotIdx].TimeRange</div>
+                                <div class="slot-cell-period">@_slotTimes[headerSlotIdx].PeriodLabel</div>
+                            }
+                            <div class="ch-line"></div>
+                        </div>
+                    }
+
+                    @for (int i = 0; i < LocationOrder.Count; i++)
+                    {
+                        var locationIdx = i;
+                        var location = LocationOrder[locationIdx];
+                        <div class="matrix-location-header @(IsLocationIncomplete(location) ? "incomplete" : "") @(IsDraggingLocation(locationIdx) ? "dragging" : "") @(IsLocationDropTarget(locationIdx) ? "drop-target" : "") @(_isLocationReorderMode ? "reorder-enabled" : "")"
+                             draggable="@(_isLocationReorderMode ? "true" : "false")"
+                             @ondragstart="() => StartLocationDrag(locationIdx)"
+                             @ondragend="ClearLocationDrag"
+                             @ondragover:preventDefault
+                             @ondragover="() => SetLocationDropTarget(locationIdx)"
+                             @ondrop="() => DropLocation(locationIdx)">
+                            <div>
+                                <div class="location-header-kicker">
+                                    Locatie
+                                </div>
+                                <div class="location-header-name">@location</div>
+                            </div>
+                            @if (_isLocationReorderMode)
+                            {
+                                <div class="location-order-actions">
+                                    <button class="location-order-btn"
+                                            type="button"
+                                            disabled="@(locationIdx == 0)"
+                                            @onclick="() => MoveLocation(locationIdx, locationIdx - 1)"
+                                            @onclick:stopPropagation
+                                            aria-label="Locatie omhoog">
+                                        Omhoog
+                                    </button>
+                                    <button class="location-order-btn"
+                                            type="button"
+                                            disabled="@(locationIdx == LocationOrder.Count - 1)"
+                                            @onclick="() => MoveLocation(locationIdx, locationIdx + 1)"
+                                            @onclick:stopPropagation
+                                            aria-label="Locatie omlaag">
+                                        Omlaag
+                                    </button>
+                                </div>
+                            }
+                        </div>
+
+                        @for (int s = 0; s < _slotTimes.Count; s++)
+                        {
+                            var slotIdx = s;
+                            <div class="location-slot-cell matrix-slot-cell @(IsActiveCell(location, slotIdx) ? "active" : "") @(IsLocationDropTarget(locationIdx) ? "drop-target" : "") @(IsValidTagDropTarget(location, slotIdx) || IsValidCardDropTarget(location, slotIdx) || IsPanelDragDropTarget(location, slotIdx) ? "tag-drop-target" : "") @(IsPastDay ? "past-day-cell" : "")"
+                                 @ondragover:preventDefault
+                                 @ondragover="() => SetLocationDropTarget(locationIdx)"
+                                 @ondrop="() => HandleCellDrop(location, slotIdx, locationIdx)">
+                                <div class="slot-cell-top">
+                                    <div>
+                                        <div class="slot-cell-time" title="@_slotTimes[slotIdx].TimeRange">@_slotTimes[slotIdx].TimeRange</div>
+                                        <div class="slot-cell-period">@_slotTimes[slotIdx].PeriodLabel</div>
+                                    </div>
+                                    @if (!IsPastDay)
+                                    {
+                                        <button class="slot-add-btn" type="button"
+                                                @onclick="() => OpenActivityComposer(location, slotIdx)"
+                                                @onclick:stopPropagation
+                                                aria-label="Activiteit toevoegen">+</button>
+                                    }
+                                </div>
+
+                                @foreach (var card in CardsFor(location, slotIdx))
+                                {
+                                    var cardIdx = _slots[slotIdx].IndexOf(card);
+                                    var cardTitle = card.Title;
+                                    var cardLocation = location;
+                                    var cardSlot = slotIdx;
+                                    var tagGame = "game";
+                                    var tagClient = "client";
+                                    var tagSupervisor = "supervisor";
+                                    <div class="admin-card @(IsDraggingCard(cardLocation, cardSlot, cardIdx) ? "card-dragging" : "")"
+                                         draggable="@(!IsPastDay ? "true" : "false")"
+                                         @ondragstart="() => StartCardDrag(cardLocation, cardSlot, cardIdx)"
+                                         @ondragend="EndCardDrag">
+                                        <div class="activity-card">
+                                            <div class="card-main">
+                                                <div class="card-tags">
+                                                    <span class="tag game @(IsDraggingTag(tagGame, cardLocation, cardSlot, cardTitle) ? "tag-dragging" : "")"
+                                                          draggable="@(!IsPastDay ? "true" : "false")"
+                                                          @ondragstart:stopPropagation
+                                                          @ondragstart="() => StartTagDrag(tagGame, cardLocation, cardSlot, cardTitle)"
+                                                          @ondragend="EndTagDrag">
+                                                        @cardTitle
+                                                    </span>
+                                                </div>
+                                                <div class="card-divider-left"></div>
+                                                <div class="card-tags">
+                                                    @foreach (var client in card.Clients)
+                                                    {
+                                                        var c = client;
+                                                        var cardPlayCount = GetCardPlayCount(c, card.Title);
+                                                        var cardConflicts = GetCardExclusivityConflicts(c, card.Clients);
+                                                        <span class="chip-wrapper">
+                                                            <span class="tag deelnemer @(IsOwnName(c) ? "own-name" : "") @(IsDraggingTag(tagClient, cardLocation, cardSlot, c) ? "tag-dragging" : "")"
+                                                                  draggable="@(!IsPastDay ? "true" : "false")"
+                                                                  @ondragstart:stopPropagation
+                                                                  @ondragstart="() => StartTagDrag(tagClient, cardLocation, cardSlot, c)"
+                                                                  @ondragend="EndTagDrag">
+                                                                @c
+                                                            </span>
+                                                            @if (cardPlayCount > 0)
+                                                            {
+                                                                var cardCountTip = $"{c} heeft dit spel al {cardPlayCount} keer gespeeld in de afgelopen twee weken";
+                                                                <span class="chip-badge chip-badge--count"
+                                                                      draggable="false"
+                                                                      @ondragstart:stopPropagation
+                                                                      @onmouseenter="(e) => OnBadgeMouseEnter(e, cardCountTip)"
+                                                                      @onmouseleave="OnBadgeMouseLeave">
+                                                                    @cardPlayCount
+                                                                </span>
+                                                            }
+                                                            @if (cardConflicts.Count > 0)
+                                                            {
+                                                                var cardNames = string.Join(", ", cardConflicts);
+                                                                var cardWarnTip = $"{c} staat op exclusief met: {cardNames}";
+                                                                <span class="chip-badge chip-badge--warn"
+                                                                      draggable="false"
+                                                                      @ondragstart:stopPropagation
+                                                                      @onmouseenter="(e) => OnBadgeMouseEnter(e, cardWarnTip)"
+                                                                      @onmouseleave="OnBadgeMouseLeave">
+                                                                    ⚠
+                                                                </span>
+                                                            }
+                                                        </span>
+                                                    }
+                                                </div>
+                                                @if (card.Supers.Any())
+                                                {
+                                                    <div class="card-divider-left"></div>
+                                                    <div class="card-tags">
+                                                        @foreach (var sup in card.Supers)
+                                                        {
+                                                            var supVar = sup;
+                                                            <span class="tag @supVar.Type @(IsDraggingTag(tagSupervisor, cardLocation, cardSlot, supVar.Name) ? "tag-dragging" : "")"
+                                                                  draggable="@(!IsPastDay ? "true" : "false")"
+                                                                  @ondragstart:stopPropagation
+                                                                  @ondragstart="() => StartTagDrag(tagSupervisor, cardLocation, cardSlot, supVar.Name)"
+                                                                  @ondragend="EndTagDrag">
+                                                                @supVar.Name
+                                                            </span>
+                                                        }
+                                                    </div>
+                                                }
+                                            </div>
+                                        </div>
+                                        @if (!IsPastDay)
+                                        {
+                                            <button class="card-edit-btn" type="button"
+                                                    @onclick="() => OpenEditComposer(location, slotIdx, cardIdx)"
+                                                    @onclick:stopPropagation
+                                                    aria-label="Bewerk activiteit">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                                                </svg>
+                                            </button>
+                                            <button class="card-delete-btn" type="button"
+                                                    @onclick="() => DeleteCard(slotIdx, cardIdx)"
+                                                    @onclick:stopPropagation
+                                                    aria-label="Verwijder planning">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                    <polyline points="3 6 5 6 21 6"/>
+                                                    <path d="M19 6l-1 14H6L5 6"/>
+                                                    <path d="M10 11v6M14 11v6"/>
+                                                    <path d="M9 6V4h6v2"/>
+                                                </svg>
+                                            </button>
+                                        }
+                                    </div>
+                                }
+
+                                @if (!CardsFor(location, slotIdx).Any())
+                                {
+                                    <div class="cards-empty slot-empty">Klik op + om activiteit te maken</div>
+                                }
+
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+
+            @if (_activeCell is { } active)
+            {
+                <div class="composer-overlay" @onclick="CloseActivityComposer">
+                    @RenderActivityComposer(active.Location, active.Slot)
+                </div>
+            }
+
+            <aside class="sidebar agenda-builder-sidebar">
+                <div class="builder-panel">
+                    @if (_builderData is not null)
+                    {
+                        @RenderBuilderSection("Spellen", "spellen", _builderData.Spellen)
+                        @RenderBuilderSection("Locaties", "locaties", _builderData.Locaties)
+                    }
+                </div>
+            </aside>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<SlotTime> _slotTimes = [];
+    private List<SlotTime> _savedSlotTimes = [];
+    private bool _isTimeEditMode;
+    private bool _isSavingSlotTimes;
+
+    private List<List<SlotCard>> _slots = EmptySlots();
+    private DateTime? _slotsUpdatedAt;
+    private BuilderData? _builderData;
+    private List<Account> _accounts = [];
+    private List<Absence> _selectedDateAbsences = [];
+    private List<string> _locationOrder = [];
+    private DateOnly _selectedDate = DateOnly.FromDateTime(DateTime.Today);
+    private (string Location, int Slot)? _activeCell;
+    private int? _activeSlot;
+    private int? _dragLocationIndex;
+    private int? _dropLocationIndex;
+    private TagDrag? _tagDrag;
+    private CardDrag? _cardDrag;
+    private TagDrag? _pendingTagDrag;
+    private PanelDrag? _panelDrag;
+    private bool _isLocationReorderMode;
+    private bool _isSavingLocationOrder;
+    private int? _draftGameId;
+    private HashSet<int> _draftSupervisorIds = [];
+    private HashSet<int> _draftParticipantIds = [];
+    private (int Slot, int CardIndex)? _editCard;
+    private string? _activityValidationMessage;
+    private string? _validationMessage;
+    private DateTime? _publishedAt;
+    private int? _publishHour;
+    private int? _publishMinute;
+    private List<PublishedDay> _publishedDays = [];
+    private List<string> _savedLocationOrder = [];
+    private List<DayStatus> _weekStatuses = [];
+    private List<RecentGameEntry> _recentGames = [];
+    private string? _badgeTooltip;
+    private string _badgeTooltipClass = "composer-caution";
+    private string? _hoverTooltip;
+    private double _hoverTooltipX;
+    private double _hoverTooltipY;
+    private CancellationTokenSource? _tooltipCts;
+
+    private void ToggleCountBadge(string tip)
+    {
+        _badgeTooltipClass = "composer-caution";
+        _badgeTooltip = _badgeTooltip == tip ? null : tip;
+    }
+
+    private void ToggleWarnBadge(string tip)
+    {
+        _badgeTooltipClass = "composer-caution-orange";
+        _badgeTooltip = _badgeTooltip == tip ? null : tip;
+    }
+
+    private async Task OnBadgeMouseEnter(MouseEventArgs e, string tip)
+    {
+        _tooltipCts?.Cancel();
+        _tooltipCts?.Dispose();
+        _tooltipCts = new CancellationTokenSource();
+        try
+        {
+            await Task.Delay(500, _tooltipCts.Token);
+            _hoverTooltip = tip;
+            _hoverTooltipX = e.ClientX;
+            _hoverTooltipY = e.ClientY;
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void OnBadgeMouseLeave(MouseEventArgs _)
+    {
+        _tooltipCts?.Cancel();
+        _hoverTooltip = null;
+    }
+
+    private int GetCardPlayCount(string clientName, string gameTitle) =>
+        _recentGames.Count(r =>
+            string.Equals(r.ClientName, clientName, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.GameTitle, gameTitle, StringComparison.OrdinalIgnoreCase));
+
+    private List<string> GetCardExclusivityConflicts(string clientName, IList<string> cardClients)
+    {
+        var account = _accounts.FirstOrDefault(a => string.Equals(a.Name, clientName, StringComparison.OrdinalIgnoreCase));
+        if (account is null) return [];
+        return _accounts
+            .Where(a => cardClients.Any(c => string.Equals(c, a.Name, StringComparison.OrdinalIgnoreCase))
+                        && !string.Equals(a.Name, clientName, StringComparison.OrdinalIgnoreCase)
+                        && account.ExclusiveWith.Contains(a.Id))
+            .Select(a => a.Name)
+            .ToList();
+    }
+
+    private bool IsPastDay => _selectedDate < DateOnly.FromDateTime(DateTime.Today);
+    private string DateKey => _selectedDate.ToString("yyyy-MM-dd");
+    private bool DayHasPlanning => _slots.Any(slot => slot.Any());
+    private bool IsPlanningPublishable => DayHasPlanning && string.IsNullOrWhiteSpace(_validationMessage);
+
+    private IEnumerable<string> RecentGameWarnings
+    {
+        get
+        {
+            if (_draftGameId is null || _builderData is null)
+                yield break;
+
+            var gameTitle = _builderData.Spellen
+                .FirstOrDefault(g => g.Id == _draftGameId)?.Name;
+            if (gameTitle is null)
+                yield break;
+
+            var selectedNames = _accounts
+                .Where(a => _draftParticipantIds.Contains(a.Id))
+                .Select(a => a.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var name in selectedNames)
+            {
+                if (_recentGames.Any(r =>
+                        string.Equals(r.ClientName, name, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(r.GameTitle, gameTitle, StringComparison.OrdinalIgnoreCase)))
+                {
+                    yield return $"{name} heeft {gameTitle} al gespeeld in de afgelopen twee weken";
+                }
+            }
+        }
+    }
+
+    private IEnumerable<string> ExclusivityWarnings
+    {
+        get
+        {
+            var selected = _accounts
+                .Where(a => _draftParticipantIds.Contains(a.Id))
+                .ToList();
+
+            var reported = new HashSet<(int, int)>();
+            foreach (var p in selected)
+            {
+                foreach (var exId in p.ExclusiveWith)
+                {
+                    var partner = selected.FirstOrDefault(a => a.Id == exId);
+                    if (partner is null) continue;
+
+                    var key = p.Id < exId ? (p.Id, exId) : (exId, p.Id);
+                    if (reported.Add(key))
+                        yield return $"Let op: {p.Name} en {partner.Name}  staan op elkaars exclusieve lijst";
+                }
+            }
+        }
+    }
+
+    private string? DraftGameTitle =>
+        _draftGameId is null || _builderData is null
+            ? null
+            : _builderData.Spellen.FirstOrDefault(g => g.Id == _draftGameId)?.Name;
+
+    private int GetGamePlayCount(string clientName)
+    {
+        var gameTitle = DraftGameTitle;
+        if (gameTitle is null) return 0;
+        return _recentGames.Count(r =>
+            string.Equals(r.ClientName, clientName, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.GameTitle, gameTitle, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private List<string> GetExclusivityConflicts(int participantId)
+    {
+        var account = _accounts.FirstOrDefault(a => a.Id == participantId);
+        if (account is null) return [];
+        return _accounts
+            .Where(a => _draftParticipantIds.Contains(a.Id) && a.Id != participantId && account.ExclusiveWith.Contains(a.Id))
+            .Select(a => a.Name)
+            .ToList();
+    }
+
+    private bool HasLocationRestriction(int participantId, string locationName)
+    {
+        if (_builderData is null) return false;
+        var locationId = _builderData.Locaties
+            .FirstOrDefault(l => string.Equals(l.Name, locationName, StringComparison.OrdinalIgnoreCase))?.Id;
+        if (locationId is null) return false;
+        var account = _accounts.FirstOrDefault(a => a.Id == participantId);
+        return account?.LocationRestrictions.Contains(locationId.Value) == true;
+    }
+
+    private IReadOnlyList<string> LocationOrder => _locationOrder.Count > 0 ? _locationOrder : ["Zonder locatie"];
+    private bool HasLocationOrderChanges => !_locationOrder.SequenceEqual(_savedLocationOrder, StringComparer.OrdinalIgnoreCase);
+
+    private bool IsAvailableOnSelectedDay(Account account)
+    {
+        if (account.Availability is null || account.Availability.Count == 0)
+            return true;
+
+        var dayKey = _selectedDate.DayOfWeek.ToString().ToLower();
+        return account.Availability.TryGetValue(dayKey, out var available) && available;
+    }
+
+    private bool IsAvailableInActiveSlot(Account account)
+    {
+        if (_activeSlot is null)
+            return true;
+        if (account.SlotAvailability is null)
+            return true;
+
+        var dayKey = _selectedDate.DayOfWeek.ToString().ToLower();
+        if (!account.SlotAvailability.TryGetValue(dayKey, out var slots))
+            return true;
+        if (slots is null || slots.Length <= _activeSlot.Value)
+            return true;
+
+        return slots[_activeSlot.Value];
+    }
+
+    private IEnumerable<Account> AvailableParticipants =>
+        _accounts
+            .Where(account => account is { Role: "deelnemer", Active: true })
+            .Where(participant => !_selectedDateAbsences.Any(absence =>
+                string.Equals(absence.Name, participant.Name, StringComparison.OrdinalIgnoreCase)))
+            .Where(IsAvailableOnSelectedDay)
+            .Where(IsAvailableInActiveSlot);
+
+    private IEnumerable<Account> ExpectedParticipants =>
+        _accounts.Where(account => account is { Role: "deelnemer", Active: true } &&
+                                    !_selectedDateAbsences.Any(absence =>
+                                        string.Equals(absence.Name, account.Name, StringComparison.OrdinalIgnoreCase)))
+            .Where(IsAvailableOnSelectedDay)
+            .Where(IsAvailableInActiveSlot);
+
+    private bool IsParticipantScheduledInActiveSlot(string participantName)
+    {
+        if (_activeSlot == null) return false;
+        return IsParticipantScheduledAtTime(participantName, _activeSlot.Value);
+    }
+
+    private IEnumerable<Account> AvailableSupervisors =>
+        _accounts.Where(account => account is { Active: true } && (account.Role == "admin" || account.Role == "vrijwilliger"))
+            .Where(supervisor => !_selectedDateAbsences.Any(absence =>
+                string.Equals(absence.Name, supervisor.Name, StringComparison.OrdinalIgnoreCase)))
+            .Where(IsAvailableOnSelectedDay)
+            .Where(IsAvailableInActiveSlot);
+
+    private bool IsAbsentOnSelectedDay(string name) =>
+        _selectedDateAbsences.Any(absence =>
+            string.Equals(absence.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    private IEnumerable<Absence> UnavailableParticipants =>
+        _selectedDateAbsences
+            .OrderBy(absence => absence.Name, StringComparer.OrdinalIgnoreCase);
+
+    private IEnumerable<AbsenceSummary> AbsenceSummaries =>
+        _selectedDateAbsences
+            .Where(a => a.Type != "ziek" && a.Type != "vakantie")
+            .GroupBy(absence => absence.Type)
+            .Select(group => new AbsenceSummary(
+                group.Key,
+                $"{AbsenceLabel(group.Key)}: {group.Count()} {(group.Count() == 1 ? "dag" : "dagen")}",
+                string.Join(", ", group.Select(absence => absence.Name))));
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Auth.CurrentUser is null || !Auth.CurrentUser.EditorEnabled)
+        {
+            Nav.NavigateTo("/dashboard");
+            return;
+        }
+
+        _slotTimes = await SlotTimesService.GetSlotTimes();
+        _savedSlotTimes = _slotTimes.Select(s => new SlotTime { Id = s.Id, SortOrder = s.SortOrder, TimeRange = s.TimeRange, PeriodLabel = s.PeriodLabel }).ToList();
+        await LoadCards();
+    }
+
+    private async Task LoadCards()
+    {
+        var planTask = Cards.GetDayPlan(DateKey);
+        var builderTask = Builder.GetBuilderData();
+        var absencesTask = AbsenceService.GetAbsences(DateKey);
+        var accountsTask = AccountService.GetAccounts();
+
+        var diff = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+        var startOfWeek = _selectedDate.AddDays(-1 * diff);
+        var endOfWeek = startOfWeek.AddDays(4);
+
+        var weekStatusesTask = Cards.GetDayStatuses(
+            startOfWeek.ToString("yyyy-MM-dd"),
+            endOfWeek.ToString("yyyy-MM-dd"));
+
+        var from = _selectedDate.AddDays(-13).ToString("yyyy-MM-dd");
+        var to   = _selectedDate.AddDays(-1).ToString("yyyy-MM-dd");
+        var recentGamesTask = Cards.GetRecentGames(from, to);
+
+        var monthStart = new DateOnly(_selectedDate.Year, _selectedDate.Month, 1);
+        var monthEnd = monthStart.AddMonths(1).AddDays(-1);
+        var publishedDaysTask = Cards.GetPublishedDays(
+            monthStart.ToString("yyyy-MM-dd"),
+            monthEnd.ToString("yyyy-MM-dd"));
+
+        await Task.WhenAll(planTask, builderTask, absencesTask, accountsTask, publishedDaysTask, weekStatusesTask, recentGamesTask);
+
+        var plan = planTask.Result;
+        _slots = NormalizeSlots(plan.Slots);
+        _slotsUpdatedAt = plan.UpdatedAt;
+        _publishedAt = plan.PublishedAt;
+        _publishedDays = publishedDaysTask.Result;
+        _weekStatuses = weekStatusesTask.Result;
+        _recentGames = recentGamesTask.Result;
+        _builderData = builderTask.Result;
+        _selectedDateAbsences = absencesTask.Result;
+        _accounts = accountsTask.Result;
+        _locationOrder = BuildLocationOrder();
+        _savedLocationOrder = [.. _locationOrder];
+        _isLocationReorderMode = false;
+        _isSavingLocationOrder = false;
+        _activeCell = null;
+        ClearLocationDrag();
+        _tagDrag = null;
+        _cardDrag = null;
+        _pendingTagDrag = null;
+        _panelDrag = null;
+        ValidatePlanning();
+    }
+
+    private async Task JumpDay(int days)
+    {
+        _selectedDate = _selectedDate.AddDays(days);
+        await LoadCards();
+    }
+
+    private async Task GoToToday()
+    {
+        _selectedDate = DateOnly.FromDateTime(DateTime.Today);
+        await LoadCards();
+    }
+
+    private async Task SelectDay(DateOnly day)
+    {
+        _selectedDate = day;
+        await LoadCards();
+    }
+
+    private IEnumerable<DateOnly> GetCurrentWeekDays()
+    {
+        int diff = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+        var startOfWeek = _selectedDate.AddDays(-1 * diff);
+
+        for (int i = 0; i < 5; i++)
+        {
+            yield return startOfWeek.AddDays(i);
+        }
+    }
+
+    private string FormatDayName(DateOnly date)
+    {
+        var days = new[] { "Zo", "Ma", "Di", "Wo", "Do", "Vr", "Za" };
+        return days[(int)date.DayOfWeek];
+    }
+
+    private async Task SelectPublishedDay(string date)
+    {
+        if (!TryParseDateKey(date, out var selectedDate))
+            return;
+
+        _selectedDate = selectedDate;
+        await LoadCards();
+    }
+
+    private void StartLocationDrag(int locationIdx)
+    {
+        if (!_isLocationReorderMode)
+            return;
+
+        _dragLocationIndex = locationIdx;
+    }
+
+    private void ClearLocationDrag()
+    {
+        _dragLocationIndex = null;
+        _dropLocationIndex = null;
+    }
+
+    private void SetLocationDropTarget(int locationIdx)
+    {
+        if (!_isLocationReorderMode)
+            return;
+
+        if (_dragLocationIndex is not null && _dragLocationIndex != locationIdx)
+            _dropLocationIndex = locationIdx;
+    }
+
+    private void DropLocation(int targetIdx)
+    {
+        if (!_isLocationReorderMode)
+            return;
+
+        if (_dragLocationIndex is not { } sourceIdx)
+            return;
+
+        MoveLocation(sourceIdx, targetIdx);
+        ClearLocationDrag();
+    }
+
+    private async Task HandleCellDrop(string location, int slotIdx, int locationIdx)
+    {
+        if (_isLocationReorderMode)
+        {
+            DropLocation(locationIdx);
+            return;
+        }
+        if (_tagDrag is not null)
+        {
+            var isEmpty = !CardsFor(location, slotIdx).Any();
+            if (isEmpty && _tagDrag.Type is "client" or "supervisor")
+                TryOpenComposerFromTagDrag(location, slotIdx);
+            else
+                await DropTag(location, slotIdx);
+        }
+        else if (_cardDrag is not null)
+            await DropCard(location, slotIdx);
+        else if (_panelDrag is not null)
+            await HandlePanelDrop(location, slotIdx);
+    }
+
+    private async Task HandlePanelDrop(string location, int slotIdx)
+    {
+        if (IsPastDay || _panelDrag is null) return;
+
+        if (_panelDrag.Type == "game")
+        {
+            var gameCard = CardsFor(location, slotIdx).FirstOrDefault();
+            if (gameCard is null)
+            {
+                OpenActivityComposer(location, slotIdx);
+                var game = _builderData?.Spellen.FirstOrDefault(g =>
+                    string.Equals(g.Name, _panelDrag.Value, StringComparison.OrdinalIgnoreCase));
+                if (game is not null)
+                    _draftGameId = game.Id;
+            }
+            else
+            {
+                gameCard.Title = _panelDrag.Value;
+                ValidatePlanning();
+                _publishedAt = null;
+                StateHasChanged();
+                await SaveSlots();
+            }
+            _panelDrag = null;
+            return;
+        }
+
+        if (IsAbsentOnSelectedDay(_panelDrag.Value))
+        {
+            Toast.Show($"{_panelDrag.Value} is afwezig en kan niet worden ingepland.");
+            _panelDrag = null;
+            return;
+        }
+
+        var card = CardsFor(location, slotIdx).FirstOrDefault();
+        if (card is null)
+        {
+            OpenActivityComposer(location, slotIdx);
+            var account = _accounts.FirstOrDefault(a =>
+                string.Equals(a.Name, _panelDrag.Value, StringComparison.OrdinalIgnoreCase));
+            if (account is not null)
+            {
+                if (_panelDrag.Type == "client")
+                    _draftParticipantIds = [account.Id];
+                else
+                    _draftSupervisorIds = [account.Id];
+            }
+            _panelDrag = null;
+            return;
+        }
+
+        if (_panelDrag.Type == "client")
+        {
+            if (card.Clients.Any(c => string.Equals(c, _panelDrag.Value, StringComparison.OrdinalIgnoreCase)))
+            {
+                Toast.Show($"{_panelDrag.Value} staat al op deze activiteit.");
+                _panelDrag = null;
+                return;
+            }
+            card.Clients.Add(_panelDrag.Value);
+        }
+        else
+        {
+            if (card.Supers.Any(s => string.Equals(s.Name, _panelDrag.Value, StringComparison.OrdinalIgnoreCase)))
+            {
+                Toast.Show($"{_panelDrag.Value} staat al op deze activiteit.");
+                _panelDrag = null;
+                return;
+            }
+            var account = _accounts.FirstOrDefault(a =>
+                string.Equals(a.Name, _panelDrag.Value, StringComparison.OrdinalIgnoreCase));
+            card.Supers.Add(new Supervisor { Name = _panelDrag.Value, Type = account?.Type ?? "sup-blue" });
+        }
+
+        _panelDrag = null;
+        ValidatePlanning();
+        _publishedAt = null;
+        StateHasChanged();
+        await SaveSlots();
+    }
+
+    private void TryOpenComposerFromTagDrag(string location, int slotIdx)
+    {
+        if (_tagDrag is null) return;
+
+        if (_tagDrag.Type is "client" or "supervisor" && IsAbsentOnSelectedDay(_tagDrag.Value))
+        {
+            Toast.Show($"{_tagDrag.Value} is afwezig en kan niet worden ingepland.");
+            _tagDrag = null;
+            return;
+        }
+
+        var sourceCard = _slots[_tagDrag.SlotIdx].FirstOrDefault(c =>
+            string.Equals(c.Location, _tagDrag.SourceLocation, StringComparison.OrdinalIgnoreCase));
+        if (sourceCard is null) return;
+
+        var canRemove = _tagDrag.Type == "client"
+            ? CardConstraints.CanRemoveClient(sourceCard)
+            : CardConstraints.CanRemoveSupervisor(sourceCard);
+        if (!canRemove) return;
+
+        _pendingTagDrag = _tagDrag;
+        _tagDrag = null;
+
+        OpenActivityComposer(location, slotIdx);
+
+        if (_pendingTagDrag.Type == "client")
+        {
+            var account = _accounts.FirstOrDefault(a =>
+                string.Equals(a.Name, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase));
+            if (account is not null)
+                _draftParticipantIds = [account.Id];
+        }
+        else
+        {
+            var account = _accounts.FirstOrDefault(a =>
+                string.Equals(a.Name, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase));
+            if (account is not null)
+                _draftSupervisorIds = [account.Id];
+        }
+    }
+
+    private void MoveLocation(int sourceIdx, int targetIdx)
+    {
+        if (sourceIdx == targetIdx
+            || sourceIdx < 0
+            || targetIdx < 0
+            || sourceIdx >= _locationOrder.Count
+            || targetIdx >= _locationOrder.Count)
+        {
+            return;
+        }
+
+        var item = _locationOrder[sourceIdx];
+        _locationOrder.RemoveAt(sourceIdx);
+        _locationOrder.Insert(targetIdx, item);
+    }
+
+    private void ToggleTimeEditMode()
+    {
+        if (_isTimeEditMode)
+        {
+            // Cancel: restore from snapshot
+            _slotTimes = _savedSlotTimes.Select(s => new SlotTime { Id = s.Id, SortOrder = s.SortOrder, TimeRange = s.TimeRange, PeriodLabel = s.PeriodLabel }).ToList();
+        }
+        _isTimeEditMode = !_isTimeEditMode;
+    }
+
+    private async Task SaveSlotTimes()
+    {
+        if (_slotTimes.Any(s => string.IsNullOrWhiteSpace(s.TimeRange) || string.IsNullOrWhiteSpace(s.PeriodLabel)))
+        {
+            Toast.Show("Vul alle tijden en labels in voor je opslaat.");
+            return;
+        }
+        _isSavingSlotTimes = true;
+        try
+        {
+            await SlotTimesService.SaveSlotTimes(_slotTimes);
+            _savedSlotTimes = _slotTimes.Select(s => new SlotTime { Id = s.Id, SortOrder = s.SortOrder, TimeRange = s.TimeRange, PeriodLabel = s.PeriodLabel }).ToList();
+            _isTimeEditMode = false;
+            Toast.Show("Tijden opgeslagen");
+        }
+        finally
+        {
+            _isSavingSlotTimes = false;
+        }
+    }
+
+    private void ToggleLocationReorderMode()
+    {
+        if (_isLocationReorderMode)
+        {
+            _locationOrder = [.. _savedLocationOrder];
+            _isLocationReorderMode = false;
+            ClearLocationDrag();
+            return;
+        }
+
+        _isLocationReorderMode = true;
+    }
+
+    private async Task SaveSlots()
+    {
+        try
+        {
+            _slotsUpdatedAt = await Cards.SaveCards(DateKey, _slots, _slotsUpdatedAt);
+        }
+        catch (PlanningConflictException ex)
+        {
+            Toast.Show(ex.Message);
+        }
+    }
+
+    private async Task SaveLocationOrder()
+    {
+        if (_builderData is null)
+            return;
+
+        var orderedLocationIds = _locationOrder
+            .Select(locationName => _builderData.Locaties.FirstOrDefault(location =>
+                string.Equals(location.Name, locationName, StringComparison.OrdinalIgnoreCase)))
+            .Where(location => location is not null)
+            .Select(location => location!.Id)
+            .Distinct()
+            .ToList();
+
+        if (!orderedLocationIds.Any())
+            return;
+
+        _isSavingLocationOrder = true;
+
+        try
+        {
+            await Builder.ReorderItems("locaties", orderedLocationIds);
+
+            var locationLookup = _builderData.Locaties.ToDictionary(location => location.Id);
+            _builderData.Locaties = orderedLocationIds
+                .Where(locationLookup.ContainsKey)
+                .Select(id => locationLookup[id])
+                .ToList();
+
+            _locationOrder = BuildLocationOrder();
+            _savedLocationOrder = [.. _locationOrder];
+            _isLocationReorderMode = false;
+            ClearLocationDrag();
+            Toast.Show("Standaardvolgorde opgeslagen");
+        }
+        finally
+        {
+            _isSavingLocationOrder = false;
+        }
+    }
+
+    private bool IsDraggingLocation(int locationIdx) => _dragLocationIndex == locationIdx;
+
+    private async Task StartTagDrag(string type, string location, int slotIdx, string value)
+    {
+        if (IsPastDay || _isLocationReorderMode) return;
+        _tagDrag = new TagDrag(type, location, slotIdx, value);
+        await JS.InvokeVoidAsync("startDragScroll");
+    }
+
+    private async Task EndTagDrag()
+    {
+        _tagDrag = null;
+        await JS.InvokeVoidAsync("stopDragScroll");
+    }
+
+    private async Task StartPanelDrag(string type, string value)
+    {
+        if (IsPastDay) return;
+        _panelDrag = new PanelDrag(type, value);
+        await JS.InvokeVoidAsync("startDragScroll");
+    }
+
+    private async Task EndPanelDrag()
+    {
+        _panelDrag = null;
+        await JS.InvokeVoidAsync("stopDragScroll");
+    }
+
+    private async Task DropTag(string targetLocation, int slotIdx)
+    {
+        if (IsPastDay || _tagDrag is null) return;
+        if (_tagDrag.Type is "client" or "supervisor" && IsAbsentOnSelectedDay(_tagDrag.Value))
+        {
+            Toast.Show($"{_tagDrag.Value} is afwezig en kan niet worden ingepland.");
+            _tagDrag = null;
+            return;
+        }
+        if (!CalendarDragHelper.TryDropTag(_slots, _tagDrag, targetLocation)) return;
+        _tagDrag = null;
+        ValidatePlanning();
+        _publishedAt = null;
+        StateHasChanged();
+        await SaveSlots();
+    }
+
+    private bool IsValidTagDropTarget(string location, int slotIdx)
+    {
+        if (_tagDrag is null || IsPastDay) return false;
+        if (_tagDrag.SlotIdx != slotIdx) return false;
+        if (string.Equals(_tagDrag.SourceLocation, location, StringComparison.OrdinalIgnoreCase)) return false;
+        if (_tagDrag.Type is "client" or "supervisor" && IsAbsentOnSelectedDay(_tagDrag.Value)) return false;
+
+        var sourceCard = _slots[slotIdx].FirstOrDefault(c =>
+            string.Equals(c.Location, _tagDrag.SourceLocation, StringComparison.OrdinalIgnoreCase));
+        if (sourceCard is null) return false;
+
+        return _tagDrag.Type switch
+        {
+            "client" => CardConstraints.CanRemoveClient(sourceCard),
+            "supervisor" => CardConstraints.CanRemoveSupervisor(sourceCard),
+            _ => true
+        };
+    }
+
+    private bool IsDraggingTag(string type, string location, int slotIdx, string value) =>
+        _tagDrag is { } d
+        && d.Type == type
+        && d.SlotIdx == slotIdx
+        && string.Equals(d.SourceLocation, location, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(d.Value, value, StringComparison.OrdinalIgnoreCase);
+
+    private async Task StartCardDrag(string location, int slotIdx, int cardIdx)
+    {
+        if (IsPastDay || _isLocationReorderMode) return;
+        _cardDrag = new CardDrag(location, slotIdx, cardIdx);
+        await JS.InvokeVoidAsync("startDragScroll");
+    }
+
+    private async Task EndCardDrag()
+    {
+        _cardDrag = null;
+        await JS.InvokeVoidAsync("stopDragScroll");
+    }
+
+    private async Task DropCard(string targetLocation, int targetSlotIdx)
+    {
+        if (IsPastDay || _cardDrag is null) return;
+        if (_cardDrag.SourceSlotIdx != targetSlotIdx) return;
+
+        if (string.Equals(_cardDrag.SourceLocation, targetLocation, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var sourceSlot = _slots[_cardDrag.SourceSlotIdx];
+        if (_cardDrag.CardIdx >= sourceSlot.Count) return;
+
+        var card = sourceSlot[_cardDrag.CardIdx];
+        sourceSlot.RemoveAt(_cardDrag.CardIdx);
+        card.Location = targetLocation;
+        _slots[targetSlotIdx].Add(card);
+
+        _cardDrag = null;
+        ValidatePlanning();
+        _publishedAt = null;
+        StateHasChanged();
+        await SaveSlots();
+    }
+
+    private bool IsDraggingCard(string location, int slotIdx, int cardIdx) =>
+        _cardDrag is { } d
+        && d.SourceSlotIdx == slotIdx
+        && string.Equals(d.SourceLocation, location, StringComparison.OrdinalIgnoreCase)
+        && d.CardIdx == cardIdx;
+
+    private bool IsValidCardDropTarget(string location, int slotIdx) =>
+        _cardDrag is not null
+        && _cardDrag.SourceSlotIdx == slotIdx
+        && !string.Equals(_cardDrag.SourceLocation, location, StringComparison.OrdinalIgnoreCase)
+        && !IsPastDay;
+
+    private bool IsLocationDropTarget(int locationIdx) => _dropLocationIndex == locationIdx;
+
+    private void SelectSlot(int slotIdx)
+    {
+        _activeSlot = slotIdx;
+    }
+
+    private void OpenActivityComposer(string location, int slotIdx)
+    {
+        if (IsPastDay)
+        {
+            Toast.Show("Je kunt geen planning toevoegen aan een dag in het verleden.");
+            return;
+        }
+        _activeSlot = slotIdx;
+        _activeCell = (location, slotIdx);
+        _draftGameId = null;
+        _draftSupervisorIds = [];
+        _draftParticipantIds = [];
+        _activityValidationMessage = null;
+        _validationMessage = null;
+    }
+
+    private void OpenEditComposer(string location, int slotIdx, int cardIdx)
+    {
+        if (IsPastDay) return;
+        var card = _slots[slotIdx][cardIdx];
+        _activeSlot = slotIdx;
+        _activeCell = (location, slotIdx);
+        _editCard = (slotIdx, cardIdx);
+        _draftGameId = _builderData?.Spellen.FirstOrDefault(g =>
+            string.Equals(g.Name, card.Title, StringComparison.OrdinalIgnoreCase))?.Id;
+        _draftSupervisorIds = _accounts
+            .Where(a => (a.Role == "admin" || a.Role == "vrijwilliger") && card.Supers.Any(s =>
+                string.Equals(s.Name, a.Name, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => a.Id)
+            .ToHashSet();
+        _draftParticipantIds = _accounts
+            .Where(a => a.Role == "deelnemer" && card.Clients.Any(c =>
+                string.Equals(c, a.Name, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => a.Id)
+            .ToHashSet();
+        _activityValidationMessage = null;
+        _validationMessage = null;
+    }
+
+    private void CloseActivityComposer()
+    {
+        _activeCell = null;
+        _editCard = null;
+        _draftGameId = null;
+        _draftSupervisorIds = [];
+        _draftParticipantIds = [];
+        _activityValidationMessage = null;
+        _pendingTagDrag = null;
+        _badgeTooltip = null;
+    }
+
+    private async Task SaveActivityFromComposer(string location, int slotIdx)
+    {
+        var selectedGame = _builderData?.Spellen.FirstOrDefault(game => game.Id == _draftGameId);
+        if (selectedGame is null)
+        {
+            _activityValidationMessage = "Selecteer eerst een spel";
+            return;
+        }
+
+        var selectedSupers = AvailableSupervisors
+            .Where(supervisor => _draftSupervisorIds.Contains(supervisor.Id))
+            .Select(supervisor => new Supervisor { Name = supervisor.Name, Type = supervisor.Type })
+            .ToList();
+        if (!selectedSupers.Any())
+        {
+            _activityValidationMessage = "Selecteer minimaal een begeleider";
+            return;
+        }
+
+        var selectedParticipants = AvailableParticipants
+            .Where(participant => _draftParticipantIds.Contains(participant.Id))
+            .ToList();
+        if (!selectedParticipants.Any())
+        {
+            _activityValidationMessage = "Selecteer minimaal een deelnemer";
+            return;
+        }
+
+        (int Slot, int CardIndex)? editInfo = _editCard is { } e && e.Slot == slotIdx ? e : null;
+        var duplicateParticipant = selectedParticipants.FirstOrDefault(participant =>
+            !(_pendingTagDrag is { Type: "client" } pd && string.Equals(pd.Value, participant.Name, StringComparison.OrdinalIgnoreCase))
+            && _slots.Count > slotIdx && _slots[slotIdx]
+                .Where((_, idx) => idx != editInfo?.CardIndex)
+                .Any(card => card.Clients.Any(c => string.Equals(c, participant.Name, StringComparison.OrdinalIgnoreCase))));
+        if (duplicateParticipant is not null)
+        {
+            _activityValidationMessage = "Deze deelnemer is al ingepland op dit moment";
+            _validationMessage = _activityValidationMessage;
+            Toast.Show(_activityValidationMessage);
+            return;
+        }
+
+        var duplicateSupervisor = selectedSupers.FirstOrDefault(sup =>
+            !(_pendingTagDrag is { Type: "supervisor" } pds && string.Equals(pds.Value, sup.Name, StringComparison.OrdinalIgnoreCase))
+            && _slots.Count > slotIdx && _slots[slotIdx]
+                .Where((_, idx) => idx != editInfo?.CardIndex)
+                .Any(card => card.Supers.Any(s => string.Equals(s.Name, sup.Name, StringComparison.OrdinalIgnoreCase))));
+        if (duplicateSupervisor is not null)
+        {
+            _activityValidationMessage = "Deze begeleider is al ingepland op dit moment";
+            _validationMessage = _activityValidationMessage;
+            Toast.Show(_activityValidationMessage);
+            return;
+        }
+
+        var newCard = new SlotCard
+        {
+            Title = selectedGame.Name,
+            Location = location,
+            Clients = selectedParticipants.Select(participant => participant.Name).ToList(),
+            Supers = selectedSupers
+        };
+
+        if (editInfo is { } edit)
+        {
+            _slots[slotIdx][edit.CardIndex] = newCard;
+        }
+        else
+        {
+            _slots[slotIdx].Add(newCard);
+        }
+
+        // Remove tag from source card if this was a drag-into-empty-slot
+        if (_pendingTagDrag is not null)
+        {
+            var stillSelected = _pendingTagDrag.Type == "client"
+                ? newCard.Clients.Any(c => string.Equals(c, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase))
+                : newCard.Supers.Any(s => string.Equals(s.Name, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase));
+
+            if (stillSelected)
+            {
+                var sourceCard = _slots[_pendingTagDrag.SlotIdx].FirstOrDefault(c =>
+                    string.Equals(c.Location, _pendingTagDrag.SourceLocation, StringComparison.OrdinalIgnoreCase));
+                if (sourceCard is not null)
+                {
+                    if (_pendingTagDrag.Type == "client")
+                    {
+                        var idx = sourceCard.Clients.FindIndex(c =>
+                            string.Equals(c, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase));
+                        if (idx >= 0) sourceCard.Clients.RemoveAt(idx);
+                    }
+                    else
+                    {
+                        var sup = sourceCard.Supers.FirstOrDefault(s =>
+                            string.Equals(s.Name, _pendingTagDrag.Value, StringComparison.OrdinalIgnoreCase));
+                        if (sup is not null) sourceCard.Supers.Remove(sup);
+                    }
+                }
+            }
+        }
+
+        CloseActivityComposer();
+        _validationMessage = null;
+        ValidatePlanning();
+        _publishedAt = null;
+        await SaveSlots();
+        Toast.Show("Activiteit opgeslagen");
+    }
+
+    private void ToggleDraftSupervisor(int supervisorId)
+    {
+        if (!_draftSupervisorIds.Add(supervisorId))
+            _draftSupervisorIds.Remove(supervisorId);
+    }
+
+    private void ToggleDraftParticipant(int participantId)
+    {
+        if (!_draftParticipantIds.Add(participantId))
+            _draftParticipantIds.Remove(participantId);
+    }
+
+    private async Task DeleteCard(int slotIdx, int cardIdx)
+    {
+        if (cardIdx < 0 || cardIdx >= _slots[slotIdx].Count)
+            return;
+
+        _slots[slotIdx].RemoveAt(cardIdx);
+        ValidatePlanning();
+        _publishedAt = null;
+        await SaveSlots();
+    }
+
+    private async Task DeleteBuilderItem(string category, int id)
+    {
+        await Builder.DeleteItem(category, id);
+        _builderData = await Builder.GetBuilderData();
+        _locationOrder = BuildLocationOrder();
+        StateHasChanged();
+    }
+
+    private void AddBuilderItem(string category)
+    {
+        Modal.Open(new ModalOptions(
+            Title: $"Nieuw item",
+            Placeholder: "Naam...",
+            ConfirmLabel: "Toevoegen",
+            OnConfirm: async name =>
+            {
+                if (string.IsNullOrWhiteSpace(name)) { Toast.Show("Vul een naam in"); return; }
+                await Builder.AddItem(category, name);
+                _builderData = await Builder.GetBuilderData();
+                _locationOrder = BuildLocationOrder();
+                Modal.Close();
+                Toast.Show("Item toegevoegd");
+                StateHasChanged();
+            }
+        ));
+    }
+
+    private void OpenPublishConfirmation()
+    {
+        if (IsPastDay) return;
+        _publishHour = 7;
+        _publishMinute = 0;
+        Modal.Open(new ModalOptions(
+            Title: "Zeker weten?",
+            ConfirmLabel: "Publiceer",
+            HideInput: true,
+            Extra: BuildPublishExtra(),
+            OnConfirm: async _ =>
+            {
+                DateTime? visibleFrom = _publishHour is { } h && _publishMinute is { } m
+                    ? new DateTime(_selectedDate.Year, _selectedDate.Month, _selectedDate.Day, h, m, 0)
+                    : null;
+                _publishedAt = DateTime.Now;
+                await Cards.PublishCards(DateKey, visibleFrom);
+                Modal.Close();
+                Toast.Show("Planning gepubliceerd");
+                StateHasChanged();
+            }
+        ));
+    }
+
+    private RenderFragment BuildPublishExtra() => __builder =>
+    {
+        <p class="modal-help-text">Deelnemers zien deze planning zodra gepubliceerd.</p>
+        <div class="publish-time-row">
+            <label class="publish-time-label">Zichtbaar vanaf:</label>
+            <select class="publish-time-select" @bind="_publishHour">
+                @for (int h = 0; h < 24; h++)
+                {
+                    var hour = h;
+                    <option value="@hour">@hour.ToString("D2")</option>
+                }
+            </select>
+            <span class="publish-time-sep">:</span>
+            <select class="publish-time-select" @bind="_publishMinute">
+                @foreach (var min in new[] { 0, 15, 30, 45 })
+                {
+                    <option value="@min">@min.ToString("D2")</option>
+                }
+            </select>
+        </div>
+    };
+
+    private RenderFragment RenderActivityComposer(string location, int slotIdx) => __builder =>
+    {
+        <div class="activity-composer" @onclick:stopPropagation>
+            <div class="activity-composer-head">
+                <div>
+                    <h3>@(_editCard is not null ? "Activiteit bewerken" : "Nieuwe activiteit")</h3>
+                    <span>@location - @_slotTimes[slotIdx].TimeRange (@_slotTimes[slotIdx].PeriodLabel)</span>
+                </div>
+                <button class="composer-close-btn" type="button" @onclick="CloseActivityComposer" aria-label="Venster sluiten">x</button>
+            </div>
+
+            <section class="composer-section">
+                <div class="composer-label">Spel</div>
+                <div class="composer-chip-list">
+                    @foreach (var game in _builderData?.Spellen ?? [])
+                    {
+                        var selected = _draftGameId == game.Id;
+                        <button class="composer-chip game @(selected ? "selected" : "")"
+                                type="button"
+                                @onclick="() => _draftGameId = game.Id">@game.Name</button>
+                    }
+                </div>
+            </section>
+
+            <section class="composer-section">
+                <div class="composer-label">Begeleiders</div>
+                <div class="composer-chip-list">
+                    @foreach (var supervisor in AvailableSupervisors)
+                    {
+                        var selected = _draftSupervisorIds.Contains(supervisor.Id);
+                        var isBeingDraggedSup = _pendingTagDrag is { Type: "supervisor" } pds &&
+                            string.Equals(pds.Value, supervisor.Name, StringComparison.OrdinalIgnoreCase);
+                        var alreadyAtTime = !isBeingDraggedSup && (_editCard is { } ec && ec.Slot == slotIdx
+                            ? _slots.Count > slotIdx && _slots[slotIdx]
+                                .Where((_, idx) => idx != ec.CardIndex)
+                                .Any(card => card.Supers.Any(s => string.Equals(s.Name, supervisor.Name, StringComparison.OrdinalIgnoreCase)))
+                            : IsSupervisorScheduledAtTime(supervisor.Name, slotIdx));
+                        <button class="composer-chip @(supervisor.Type == "sup-green" ? "sup-green" : "sup-blue") @(selected ? "selected" : "")"
+                                type="button"
+                                disabled="@alreadyAtTime"
+                                title="@(alreadyAtTime ? "Deze begeleider is al ingepland op dit moment" : null)"
+                                @onclick="() => ToggleDraftSupervisor(supervisor.Id)">
+                            @supervisor.Name
+                            @if (alreadyAtTime)
+                            {
+                                <small>al ingepland</small>
+                            }
+                        </button>
+                    }
+                </div>
+            </section>
+
+            <section class="composer-section">
+                <div class="composer-label">Deelnemers</div>
+                <div class="composer-chip-list scroll">
+                    @foreach (var participant in AvailableParticipants)
+                    {
+                        var selected = _draftParticipantIds.Contains(participant.Id);
+                        var isBeingDraggedClient = _pendingTagDrag is { Type: "client" } pdc &&
+                            string.Equals(pdc.Value, participant.Name, StringComparison.OrdinalIgnoreCase);
+                        var alreadyAtTime = !isBeingDraggedClient && (_editCard is { } ec && ec.Slot == slotIdx
+                            ? _slots.Count > slotIdx && _slots[slotIdx]
+                                .Where((_, idx) => idx != ec.CardIndex)
+                                .Any(card => card.Clients.Any(c => string.Equals(c, participant.Name, StringComparison.OrdinalIgnoreCase)))
+                            : IsParticipantScheduledAtTime(participant.Name, slotIdx));
+                        var playCount = GetGamePlayCount(participant.Name);
+                        var conflicts = GetExclusivityConflicts(participant.Id);
+                        var locationBlock = HasLocationRestriction(participant.Id, location);
+                        <span class="chip-wrapper">
+                            <button class="composer-chip deelnemer @(selected ? "selected" : "") @(IsOwnName(participant.Name) ? "own-name" : "")"
+                                    type="button"
+                                    disabled="@alreadyAtTime"
+                                    title="@(alreadyAtTime ? "Deze deelnemer is al ingepland op dit moment" : null)"
+                                    @onclick="() => ToggleDraftParticipant(participant.Id)">
+                                @participant.Name
+                                @if (alreadyAtTime)
+                                {
+                                    <small>al ingepland</small>
+                                }
+                            </button>
+                            @if (playCount > 0)
+                            {
+                                var countTip = $"{participant.Name} heeft dit spel al {playCount} keer gespeeld in de afgelopen twee weken";
+                                <span class="chip-badge chip-badge--count"
+                                      tabindex="0"
+                                      @onmousedown:stopPropagation="true"
+                                      @onclick:stopPropagation="true"
+                                      @onclick="() => ToggleCountBadge(countTip)"
+                                      @onmouseenter="(e) => OnBadgeMouseEnter(e, countTip)"
+                                      @onmouseleave="OnBadgeMouseLeave">
+                                    @playCount
+                                </span>
+                            }
+                            @if (conflicts.Count > 0)
+                            {
+                                var names = string.Join(", ", conflicts);
+                                var warnTip = $"{participant.Name} staat op exclusief met: {names}";
+                                <span class="chip-badge chip-badge--warn"
+                                      tabindex="0"
+                                      @onmousedown:stopPropagation="true"
+                                      @onclick:stopPropagation="true"
+                                      @onclick="() => ToggleWarnBadge(warnTip)"
+                                      @onmouseenter="(e) => OnBadgeMouseEnter(e, warnTip)"
+                                      @onmouseleave="OnBadgeMouseLeave">
+                                    ⚠
+                                </span>
+                            }
+                            @if (locationBlock)
+                            {
+                                var locTip = $"{participant.Name} mag niet naar {location}";
+                                <span class="chip-badge chip-badge--warn"
+                                      tabindex="0"
+                                      @onmousedown:stopPropagation="true"
+                                      @onclick:stopPropagation="true"
+                                      @onclick="() => ToggleWarnBadge(locTip)"
+                                      @onmouseenter="(e) => OnBadgeMouseEnter(e, locTip)"
+                                      @onmouseleave="OnBadgeMouseLeave">
+                                    ⚠
+                                </span>
+                            }
+                        </span>
+                    }
+                </div>
+            </section>
+
+            @if (_badgeTooltip is not null)
+            {
+                <div class="@_badgeTooltipClass" role="alert">@_badgeTooltip</div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(_activityValidationMessage))
+            {
+                <div class="composer-warning" role="alert">@_activityValidationMessage</div>
+            }
+
+            <div class="composer-actions">
+                <button class="composer-cancel-btn" type="button" @onclick="CloseActivityComposer">Annuleren</button>
+                <button class="composer-save-btn" type="button" @onclick="() => SaveActivityFromComposer(location, slotIdx)">Opslaan</button>
+            </div>
+        </div>
+    };
+
+    private IEnumerable<SlotCard> CardsFor(string location, int slotIdx) =>
+        _slots.Count > slotIdx
+            ? _slots[slotIdx].Where(card => string.Equals(card.Location, location, StringComparison.OrdinalIgnoreCase))
+            : [];
+
+    private bool IsActiveCell(string location, int slotIdx) =>
+        _activeCell is { } cell
+        && cell.Slot == slotIdx
+        && string.Equals(cell.Location, location, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsParticipantScheduledAtTime(string participantName, int slotIdx) =>
+        _slots.Count > slotIdx
+        && _slots[slotIdx].Any(card => card.Clients.Any(participant =>
+            string.Equals(participant, participantName, StringComparison.OrdinalIgnoreCase)));
+
+    private bool IsSupervisorScheduledAtTime(string supervisorName, int slotIdx) =>
+        _slots.Count > slotIdx
+        && _slots[slotIdx].Any(card => card.Supers.Any(s =>
+            string.Equals(s.Name, supervisorName, StringComparison.OrdinalIgnoreCase)));
+
+    private bool IsParticipantScheduledAnywhere(string participantName) =>
+        _slots
+            .SelectMany(slot => slot)
+            .Any(card => card.Clients.Any(participant => string.Equals(participant, participantName, StringComparison.OrdinalIgnoreCase)));
+
+    private bool IsSupervisorScheduledAnywhere(string supervisorName) =>
+        _slots
+            .SelectMany(slot => slot)
+            .Any(card => card.Supers.Any(s =>
+                string.Equals(s.Name, supervisorName, StringComparison.OrdinalIgnoreCase)));
+
+    private bool IsPanelDragDropTarget(string location, int slotIdx) =>
+        _panelDrag is not null && !IsPastDay;
+
+    private bool IsLocationIncomplete(string location) =>
+        !_slots.SelectMany(slot => slot).Any(card =>
+            string.Equals(card.Location, location, StringComparison.OrdinalIgnoreCase) && card.Clients.Any());
+
+    private bool IsOwnName(string name) =>
+        Auth.CurrentUser?.Name is { } currentUserName
+        && string.Equals(currentUserName, name, StringComparison.OrdinalIgnoreCase);
+
+    private void ValidatePlanning()
+    {
+        for (var slotIdx = 0; slotIdx < _slots.Count; slotIdx++)
+        {
+            var clients = _slots[slotIdx].SelectMany(card => card.Clients);
+            if (clients.GroupBy(client => client, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+            {
+                _validationMessage = "Deze deelnemer is al ingepland op dit moment";
+                return;
+            }
+
+            var supers = _slots[slotIdx].SelectMany(card => card.Supers.Select(s => s.Name));
+            if (supers.GroupBy(s => s, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+            {
+                _validationMessage = "Deze begeleider is al ingepland op dit moment";
+                return;
+            }
+        }
+
+        _validationMessage = null;
+    }
+
+    private List<string> BuildLocationOrder()
+    {
+        var locations = new List<string>();
+        if (_builderData is not null)
+            locations.AddRange(_builderData.Locaties.Select(location => location.Name));
+
+        locations.AddRange(_slots.SelectMany(slot => slot)
+            .Select(card => card.Location)
+            .Where(location => !string.IsNullOrWhiteSpace(location)));
+
+        return locations
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .DefaultIfEmpty("Zonder locatie")
+            .ToList();
+    }
+
+    private static List<List<SlotCard>> NormalizeSlots(List<List<SlotCard>>? slots)
+    {
+        var normalized = EmptySlots();
+        if (slots is null)
+            return normalized;
+
+        for (var i = 0; i < Math.Min(slots.Count, normalized.Count); i++)
+            normalized[i] = slots[i] ?? [];
+
+        return normalized;
+    }
+
+    private static List<List<SlotCard>> EmptySlots() =>
+        Enumerable.Range(0, 4).Select(_ => new List<SlotCard>()).ToList();
+
+    private static string AbsenceLabel(string type) => type switch
+    {
+        "ziek" => "Ziek",
+        "vakantie" => "Vakantie",
+        _ => "Afwezig"
+    };
+
+    private static string FormatPublishedDate(string key)
+    {
+        var days = new[] { "zo", "ma", "di", "wo", "do", "vr", "za" };
+        var date = ParseDateKey(key);
+        return $"{days[(int)date.DayOfWeek]} {date.Day}";
+    }
+
+    private static string FormatMonth(DateOnly date)
+    {
+        var months = new[] { "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec" };
+        return $"{months[date.Month - 1]} {date.Year}";
+    }
+
+    private static string NormalizeDateKey(string key) => ParseDateKey(key).ToString("yyyy-MM-dd");
+
+    private static DateOnly ParseDateKey(string key)
+    {
+        if (TryParseDateKey(key, out var date))
+            return date;
+
+        throw new FormatException($"Invalid date key '{key}'.");
+    }
+
+    private static bool TryParseDateKey(string? key, out DateOnly date)
+    {
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            if (DateOnly.TryParse(key, out date))
+                return true;
+
+            if (DateTimeOffset.TryParse(key, out var dateTimeOffset))
+            {
+                date = DateOnly.FromDateTime(dateTimeOffset.LocalDateTime);
+                return true;
+            }
+
+            if (DateTime.TryParse(key, out var dateTime))
+            {
+                date = DateOnly.FromDateTime(dateTime);
+                return true;
+            }
+        }
+
+        date = default;
+        return false;
+    }
+
+    private RenderFragment RenderBuilderSection(string label, string category, List<BuilderItem> items) =>
+        __builder =>
+        {
+            <section class="builder-section">
+                <div class="bs-header">
+                    <span class="bs-title">@label</span>
+                    <button class="bs-add" type="button" @onclick="() => AddBuilderItem(category)">+</button>
+                </div>
+                <div class="bs-divider"></div>
+                <div class="bs-tags">
+                    @foreach (var item in items)
+                    {
+                        var it = item;
+                        var isGameItem = category == "spellen";
+                        var builderDragType = "game";
+                        <span class="builder-tag @it.Type @(IsOwnName(it.Name) ? "own-name" : "")"
+                              draggable="@(isGameItem && !IsPastDay ? "true" : "false")"
+                              @ondragstart="() => StartPanelDrag(builderDragType, it.Name)"
+                              @ondragend="EndPanelDrag">
+                            @it.Name
+                            <button class="builder-tag-delete" type="button"
+                                    @onclick="() => DeleteBuilderItem(category, it.Id)"
+                                    aria-label="Verwijder @it.Name">×</button>
+                        </span>
+                    }
+                </div>
+            </section>
+        };
+
+    private record AbsenceSummary(string Type, string Label, string Names);
+}

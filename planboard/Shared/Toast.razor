@@ -1,0 +1,35 @@
+@* Shared/Toast.razor *@
+@inject ToastService ToastService
+@implements IDisposable
+
+<div class="toast @(_visible ? "show" : "")">@_message</div>
+
+@code {
+    private string _message = "";
+    private bool _visible;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        ToastService.OnShow += ShowToast;
+    }
+
+    private void ShowToast(string message)
+    {
+        _message = message;
+        _visible = true;
+        _timer?.Dispose();
+        _timer = new System.Threading.Timer(_ =>
+        {
+            _visible = false;
+            InvokeAsync(StateHasChanged);
+        }, null, 2500, Timeout.Infinite);
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        ToastService.OnShow -= ShowToast;
+        _timer?.Dispose();
+    }
+}

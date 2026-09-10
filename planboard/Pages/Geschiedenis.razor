@@ -1,0 +1,308 @@
+@page "/geschiedenis"
+@attribute [Authorize(Roles = "admin")]
+@inject CardService Cards
+@inject AuthService Auth
+@inject IJSRuntime JS
+@inject ToastService Toast
+@inject AbsenceService AbsenceService
+
+<PageTitle>Geschiedenis</PageTitle>
+
+<div class="screen active">
+    <div class="geschiedenis-wrap">
+        <div class="datum-nav">
+            <div class="agenda-date-picker">
+                <span aria-hidden="true">Cal</span>
+                <input type="date" @bind="_selectedDate" @bind:after="LoadDay" aria-label="Kies datum" />
+            </div>
+            <button class="datum-nav-btn" type="button" @onclick="PrevWeek">← Vorige</button>
+            <div class="datum-row">
+                @foreach (var day in GetCurrentWeekDays())
+                {
+                    var isToday = day == DateOnly.FromDateTime(DateTime.Today);
+                    var isActive = day == _selectedDate;
+                    <button class="datum-chip @(isActive ? "active" : "") @(isToday ? "today-chip" : "")"
+                            type="button" @onclick="() => SelectDay(day)">
+                        @(isToday ? "Vandaag" : FormatDate(day))
+                    </button>
+                }
+            </div>
+            <button class="datum-nav-btn @(IsCurrentWeek ? "datum-nav-btn--disabled" : "")"
+                    type="button" @onclick="NextWeek" disabled="@IsCurrentWeek">Volgende →</button>
+            <button class="datum-nav-btn" type="button" @onclick="ExportWeekExcel" disabled="@_isExporting">↓ Excel</button>
+            <button class="datum-nav-btn" type="button" @onclick="CopyWeekToClipboard" disabled="@_isExporting">Kopieer</button>
+        </div>
+
+        <div class="gesch-day-title">
+            @(_selectedDate == DateOnly.FromDateTime(DateTime.Today) ? "Vandaag" : FormatDate(_selectedDate))
+        </div>
+
+        @if (_slots is null)
+        {
+            <div class="cards-empty">Geen activiteiten opgeslagen voor deze dag</div>
+        }
+        else
+        {
+            <div class="agenda-grid-wrap">
+                <div class="agenda-matrix gesch-matrix">
+                    <div class="matrix-corner">
+                        <span>Locaties</span>
+                    </div>
+
+                    @for (int s = 0; s < Slots.Length; s++)
+                    {
+                        var headerSlotIdx = s;
+                        <div class="matrix-time-header">
+                            <div class="slot-cell-time">@Slots[headerSlotIdx].Time</div>
+                            <div class="slot-cell-period">@Slots[headerSlotIdx].Period</div>
+                        </div>
+                    }
+
+                    @foreach (var location in _locations)
+                    {
+                        <div class="matrix-location-header">
+                            <div>
+                                <div class="location-header-kicker">Locatie</div>
+                                <div class="location-header-name">@location</div>
+                            </div>
+                        </div>
+
+                        @for (int s = 0; s < Slots.Length; s++)
+                        {
+                            var slotIdx = s;
+                            var cellCards = CardsFor(location, slotIdx);
+                            <div class="location-slot-cell gesch-slot-cell">
+                                @if (cellCards.Any())
+                                {
+                                    @foreach (var card in cellCards)
+                                    {
+                                        <ActivityCard Card="@card" ShowSupervisorColumn="false" ShowLocation="false" CurrentUserName="@Auth.CurrentUser?.Name" />
+                                    }
+                                }
+                                else
+                                {
+                                    <div class="cards-empty slot-empty">—</div>
+                                }
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        }
+        <div class="afmeldingen-panel" style="margin-top: 16px;">
+            <div class="afmeldingen-title">Afmeldingen</div>
+            <div class="afmeldingen-line"></div>
+            <div class="afmeldingen-tags">
+                @if (_absences.Any())
+                {
+                    @foreach (var absence in _absences)
+                    {
+                        <span class="afmelding-tag @absence.Type">@absence.Name</span>
+                    }
+                }
+                else
+                {
+                    <span style="color:#bbb;font-size:13px;">Geen afmeldingen</span>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private static readonly (string Time, string Period)[] Slots =
+    [
+        ("10:00 - 11:00", "ochtend 1"),
+        ("11:30 - 12:15", "ochtend 2"),
+        ("13:00 - 14:00", "middag 1"),
+        ("14:30 - 15:30", "middag 2")
+    ];
+
+    private DateOnly _selectedDate = DateOnly.FromDateTime(DateTime.Today);
+    private List<List<SlotCard>>? _slots;
+    private List<string> _locations = [];
+    private List<Absence> _absences = [];
+
+    protected override async Task OnInitializedAsync() => await LoadDay();
+
+    private async Task SelectDay(DateOnly day)
+    {
+        _selectedDate = day;
+        await LoadDay();
+    }
+
+    private async Task PrevWeek()
+    {
+        _selectedDate = _selectedDate.AddDays(-7);
+        await LoadDay();
+    }
+
+    private async Task NextWeek()
+    {
+        if (IsCurrentWeek) return;
+        _selectedDate = _selectedDate.AddDays(7);
+        await LoadDay();
+    }
+
+    private bool _isExporting;
+
+    private record ExportRow(string Datum, string Tijdslot, string Locatie, string Activiteit, string Deelnemers, string Begeleiders);
+
+    private static string SupervisorLabel(Supervisor sup)
+    {
+        var kleur = sup.Type == "sup-blue" ? "blauw" : "groen";
+        return sup.Name + " (" + kleur + ")";
+    }
+
+    private async Task<List<ExportRow>> BuildWeekRows()
+    {
+        var weekDays = GetCurrentWeekDays().ToList();
+        var tasks = weekDays.Select(day => Cards.GetCards(day.ToString("yyyy-MM-dd")));
+        var results = await Task.WhenAll(tasks);
+
+        var rows = new List<ExportRow>();
+        for (int d = 0; d < weekDays.Count; d++)
+        {
+            var daySlots = results[d];
+            if (!daySlots.Any(s => s.Any())) continue;
+            var datum = FormatDate(weekDays[d]);
+            for (int s = 0; s < Slots.Length && s < daySlots.Count; s++)
+            {
+                foreach (var card in daySlots[s])
+                {
+                    var deelnemers = string.Join(", ", card.Clients);
+                    var begeleiders = string.Join(", ", card.Supers.Select(SupervisorLabel));
+                    rows.Add(new ExportRow(datum, Slots[s].Time, card.Location, card.Title, deelnemers, begeleiders));
+                }
+            }
+        }
+        return rows;
+    }
+
+    private async Task ExportWeekExcel()
+    {
+        _isExporting = true;
+        try
+        {
+            var rows = await BuildWeekRows();
+            var data = rows.Select(r => new
+            {
+                Datum = r.Datum,
+                Tijdslot = r.Tijdslot,
+                Locatie = r.Locatie,
+                Activiteit = r.Activiteit,
+                Deelnemers = r.Deelnemers,
+                Begeleiders = r.Begeleiders
+            }).ToList();
+
+            int diff = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var monday = _selectedDate.AddDays(-diff);
+            var friday = monday.AddDays(4);
+
+            var allAbsences = await AbsenceService.GetAbsences();
+            var absenceRows = AbsenceWeekFilter.BuildExportRows(allAbsences, monday, friday);
+
+            var filename = "geschiedenis_week_" + monday.ToString("yyyy-MM-dd") + ".xlsx";
+            await JS.InvokeVoidAsync("exportHelper.downloadExcel", filename, data, absenceRows);
+        }
+        finally
+        {
+            _isExporting = false;
+        }
+    }
+
+    private async Task CopyWeekToClipboard()
+    {
+        _isExporting = true;
+        try
+        {
+            var rows = await BuildWeekRows();
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Datum\tTijdslot\tLocatie\tActiviteit\tDeelnemers\tBegeleiders");
+            foreach (var r in rows)
+                sb.AppendLine(r.Datum + "\t" + r.Tijdslot + "\t" + r.Locatie + "\t" + r.Activiteit + "\t" + r.Deelnemers + "\t" + r.Begeleiders);
+
+            int diff = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var monday = _selectedDate.AddDays(-diff);
+            var friday = monday.AddDays(4);
+
+            var allAbsences = await AbsenceService.GetAbsences();
+            var absenceRows = AbsenceWeekFilter.BuildExportRows(allAbsences, monday, friday);
+
+            if (absenceRows.Any())
+            {
+                sb.AppendLine();
+                sb.AppendLine("Afmeldingen");
+                sb.AppendLine("Naam\tType\tVan\tTot");
+                foreach (var a in absenceRows)
+                    sb.AppendLine(a[0] + "\t" + a[1] + "\t" + a[2] + "\t" + a[3]);
+            }
+
+            await JS.InvokeVoidAsync("exportHelper.copyToClipboard", sb.ToString());
+            Toast.Show("Week gekopieerd naar klembord");
+        }
+        finally
+        {
+            _isExporting = false;
+        }
+    }
+
+    private bool IsCurrentWeek
+    {
+        get
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            int diffToday = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var startOfCurrentWeek = today.AddDays(-1 * diffToday);
+
+            int diffSelected = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var startOfSelectedWeek = _selectedDate.AddDays(-1 * diffSelected);
+
+            return startOfSelectedWeek >= startOfCurrentWeek;
+        }
+    }
+
+    private IEnumerable<DateOnly> GetCurrentWeekDays()
+    {
+        int diff = (7 + (_selectedDate.DayOfWeek - DayOfWeek.Monday)) % 7;
+        var startOfWeek = _selectedDate.AddDays(-1 * diff);
+
+        for (int i = 0; i < 5; i++)
+        {
+            yield return startOfWeek.AddDays(i);
+        }
+    }
+
+    private async Task LoadDay()
+    {
+        var dateStr = _selectedDate.ToString("yyyy-MM-dd");
+        var result = await Cards.GetCards(dateStr);
+        _absences = await AbsenceService.GetAbsences(dateStr);
+        if (!result.Any(s => s.Any()))
+        {
+            _slots = null;
+            _locations = [];
+            return;
+        }
+
+        _slots = result;
+        _locations = _slots
+            .SelectMany(slot => slot)
+            .Select(card => card.Location)
+            .Where(loc => !string.IsNullOrWhiteSpace(loc))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private IEnumerable<SlotCard> CardsFor(string location, int slotIdx) =>
+        _slots is not null && _slots.Count > slotIdx
+            ? _slots[slotIdx].Where(card => string.Equals(card.Location, location, StringComparison.OrdinalIgnoreCase))
+            : [];
+
+    private static string FormatDate(DateOnly date)
+    {
+        var days = new[] { "zo", "ma", "di", "wo", "do", "vr", "za" };
+        var months = new[] { "jan","feb","mrt","apr","mei","jun","jul","aug","sep","okt","nov","dec" };
+        return $"{days[(int)date.DayOfWeek]} {date.Day} {months[date.Month - 1]}";
+    }
+}

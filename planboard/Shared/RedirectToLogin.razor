@@ -1,0 +1,13 @@
+@inject AuthService Auth
+@inject NavigationManager Nav
+
+@code {
+    protected override void OnInitialized()
+    {
+        var target = Auth.CurrentUser is null
+            ? "/login"
+            : Auth.CurrentUser.Role == "deelnemer" ? "/home" : "/dashboard";
+
+        Nav.NavigateTo(target, replace: true);
+    }
+}

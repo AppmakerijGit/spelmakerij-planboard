@@ -1,0 +1,200 @@
+@* Shared/NavBar.razor *@
+@implements IDisposable
+@inject AuthService Auth
+@inject NavigationManager Nav
+@inject AbsenceService AbsenceService
+@inject AccountService AccountService
+@inject ModalService Modal
+@inject ToastService Toast
+
+<AuthorizeView>
+    <Authorized>
+        <nav class="nav-bar">
+            @if (Auth.CurrentUser?.Role == "admin")
+            {
+                <a class="nav-logo" href="@DefaultRoute" aria-label="Ga naar home">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                        <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                    </svg>
+                    <span>home</span>
+                </a>
+            }
+            @if (Auth.CurrentUser?.Role == "admin")
+            {
+                <div class="nav-links">
+                    @if (Auth.CurrentUser?.EditorEnabled == true)
+                    {
+                        <button class="nav-link-btn @(IsActive("/calendar") ? "active" : "")" type="button" @onclick='() => Nav.NavigateTo("/calendar")'>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                                <line x1="16" y1="2" x2="16" y2="6"></line>
+                                <line x1="8" y1="2" x2="8" y2="6"></line>
+                                <line x1="3" y1="10" x2="21" y2="10"></line>
+                            </svg>
+                            <span>Agenda</span>
+                        </button>
+                    }
+                    <button class="nav-link-btn @(IsActive("/geschiedenis") ? "active" : "")" type="button" @onclick='() => Nav.NavigateTo("/geschiedenis")'>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M12 8v4l3 3"></path><circle cx="12" cy="12" r="9"></circle>
+                        </svg>
+                        <span>Geschiedenis</span>
+                    </button>
+                    <button class="nav-link-btn @(IsActive("/accounts") ? "active" : "")" type="button" @onclick='() => Nav.NavigateTo("/accounts")'>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="9" cy="7" r="4"></circle>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                        </svg>
+                        <span>Accounts</span>
+                    </button>
+                </div>
+            }
+            <div class="nav-user">
+                <button class="nav-ziek-btn" type="button" @onclick="OpenAbsenceModal">Ziek melden</button>
+                <span>@Auth.CurrentUser?.Name</span>
+                <div class="nav-avatar">@Auth.CurrentUser?.Initials</div>
+                <button class="nav-logout-btn" type="button" @onclick="DoLogout">Uitloggen</button>
+            </div>
+        </nav>
+    </Authorized>
+</AuthorizeView>
+
+@code {
+    private string DefaultRoute =>
+        Auth.CurrentUser?.Role is "deelnemer" or "vrijwilliger" ? "/home" : "/dashboard";
+
+    private bool IsActive(string path) =>
+        string.Equals(new Uri(Nav.Uri).AbsolutePath, path, StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnInitialized()
+    {
+        Nav.LocationChanged += OnLocationChanged;
+        Auth.UserStateChanged += StateHasChanged;
+    }
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    {
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        Nav.LocationChanged -= OnLocationChanged;
+        Auth.UserStateChanged -= StateHasChanged;
+    }
+
+    private async Task DoLogout()
+    {
+        await Auth.Logout();
+        Nav.NavigateTo("/login");
+    }
+
+    private string _absType = "ziek";
+    private DateOnly? _absFrom;
+    private DateOnly? _absTo;
+    private string _absReason = "";
+    private List<Account> _absAccounts = [];
+    private int? _absSelectedAccountId;
+    private List<Absence> _existingAbsences = [];
+
+    private async Task OpenAbsenceModal()
+    {
+        _absType = "ziek";
+        _absFrom = DateOnly.FromDateTime(DateTime.Today);
+        _absTo = DateOnly.FromDateTime(DateTime.Today);
+        _absReason = "";
+        _absSelectedAccountId = Auth.CurrentUser?.Id;
+
+        if (Auth.CurrentUser?.Role == "admin")
+        {
+            var accounts = await AccountService.GetAccounts();
+            _existingAbsences = await AbsenceService.GetAbsences();
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var absentNames = _existingAbsences
+                .Where(a => AbsenceWeekFilter.ParseDate(a.ToDate ?? a.Date) >= today)
+                .Select(a => a.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _absAccounts = accounts
+                .Where(a => a.Active && !absentNames.Contains(a.Name))
+                .ToList();
+        }
+
+        Modal.Open(new ModalOptions(
+            Title: "Ziek melden",
+            HideInput: true,
+            ConfirmLabel: "Melden",
+            Extra: BuildAbsenceExtra(),
+            OnConfirm: async _ =>
+            {
+                var name = Auth.CurrentUser?.Role == "admin"
+                    ? _absAccounts.FirstOrDefault(a => a.Id == _absSelectedAccountId)?.Name
+                    : Auth.CurrentUser?.Name;
+                if (string.IsNullOrWhiteSpace(name)) { Toast.Show("Niet ingelogd"); return; }
+
+                if (_absFrom is null || _absTo is null)
+                { Toast.Show("Vul een periode in"); return; }
+
+                if (_absFrom < DateOnly.FromDateTime(DateTime.Today))
+                { Toast.Show("Absentie in het verleden is niet toegestaan"); return; }
+
+                if (_absTo < _absFrom)
+                { Toast.Show("Einddatum kan niet voor startdatum liggen"); return; }
+
+                var absence = new Absence
+                {
+                    Name = name,
+                    Date = DateTime.Today.ToString("yyyy-MM-dd"),
+                    Type = _absType,
+                    FromDate = _absFrom?.ToString("yyyy-MM-dd"),
+                    ToDate = _absTo?.ToString("yyyy-MM-dd"),
+                    Reason = _absReason
+                };
+                await AbsenceService.ReportAbsence(absence);
+                Modal.Close();
+                Toast.Show("Absentie opgeslagen");
+            }
+        ));
+    }
+
+    private RenderFragment BuildAbsenceExtra() => __builder =>
+    {
+        if (Auth.CurrentUser?.Role == "admin")
+        {
+            <div class="modal-user-info">Absentie voor:</div>
+            <select class="modal-select absentie-account-select" @bind="_absSelectedAccountId">
+                @foreach (var account in _absAccounts)
+                {
+                    <option value="@account.Id">@account.Name</option>
+                }
+            </select>
+        }
+        else
+        {
+            <div class="modal-user-info">Absentie voor: <strong>@Auth.CurrentUser?.Name</strong></div>
+        }
+        <select class="modal-select" @bind="_absType">
+            <option value="ziek">Ziek</option>
+            <option value="vakantie">Vakantie</option>
+            <option value="anders">Anders</option>
+        </select>
+        <div class="abs-date-row">
+            <div class="abs-date-group">
+                <label>Van</label>
+                <input type="date" class="modal-input abs-date-input" @bind="_absFrom" min="@DateTime.Today.ToString("yyyy-MM-dd")" />
+            </div>
+            <div class="abs-date-group">
+                <label>Tot</label>
+                <input type="date" class="modal-input abs-date-input" @bind="_absTo" min="@(_absFrom?.ToString("yyyy-MM-dd") ?? DateTime.Today.ToString("yyyy-MM-dd"))" />
+            </div>
+        </div>
+        <textarea class="modal-input abs-reason-textarea" @bind="_absReason"
+                  placeholder="Notities..." rows="3"></textarea>
+    };
+}

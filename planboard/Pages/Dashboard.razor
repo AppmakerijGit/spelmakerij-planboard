@@ -1,0 +1,604 @@
+@page "/dashboard"
+@attribute [Authorize(Roles = "admin")]
+@implements IDisposable
+@inject CardService Cards
+@inject AbsenceService AbsenceService
+@inject BuilderService BuilderService
+@inject AuthService Auth
+@inject ModalService Modal
+@inject NavigationManager Nav
+@inject AccountService AccountService
+@inject ToastService Toast
+
+<PageTitle>Dashboard</PageTitle>
+
+<div class="screen active">
+    <div class="dashboard-wrap">
+        <div class="dashboard-top">
+            <div class="dashboard-top-left">
+                <div class="stat-card purple">
+                    <div class="stat-number">@(_ziekCount + _vakantieCount)</div>
+                    <div class="stat-label">afwezig</div>
+                </div>
+                <div class="afmeldingen-panel">
+                    <div class="afmeldingen-title">Afmeldingen</div>
+                    <div class="afmeldingen-line"></div>
+                    <div class="afmeldingen-tags">
+                        @if (_todayAbsences.Any())
+                        {
+                            @foreach (var a in _todayAbsences)
+                            {
+                                <span class="afmelding-tag @a.Type"
+                                      title="@AbsenceTooltip(a)"
+                                      @onclick="() => ShowAbsenceDetail(a)"
+                                      style="cursor: pointer;">@a.Name</span>
+                            }
+                        }
+                        else
+                        {
+                            <span style="color:#bbb;font-size:13px;">Geen afmeldingen vandaag</span>
+                        }
+                    </div>
+                </div>
+            </div>
+            <div class="dashboard-top-right"></div>
+        </div>
+        <div class="datum-nav" style="margin-top: 16px;">
+            <div class="datum-row">
+                <button class="week-nav-btn" type="button"
+                        disabled="@(_weekOffset <= 0)"
+                        @onclick="async () => { _weekOffset--; await LoadWeek(); }"
+                        aria-label="Vorige week">←</button>
+                @foreach (var day in _weekData)
+                {
+                    var isToday = day.Date == DateTime.Today.ToString("yyyy-MM-dd");
+                    var isActive = day.Date == _selectedDate;
+                    <button class="datum-chip @(isActive ? "active" : "") @(isToday ? "today-chip" : "")"
+                            type="button" @onclick="() => _selectedDate = day.Date">
+                        @(isToday ? "Vandaag" : day.DayName)
+                    </button>
+                }
+                <button class="week-nav-btn" type="button"
+                        disabled="@(_weekOffset >= 1)"
+                        @onclick="async () => { _weekOffset++; await LoadWeek(); }"
+                        aria-label="Volgende week">→</button>
+            </div>
+        </div>
+
+        <div class="dashboard-calendar @(_showFullWeek ? "full-week" : "")">
+            @if (_showFullWeek)
+            {
+                @foreach (var day in _weekData)
+                {
+                    <div class="gesch-day-title" style="margin-top:24px; font-size: 18px;">@day.DayName</div>
+                    <div class="dashboard-calendar-day-grid">
+                        @for (int i = 0; i < Slots.Length; i++)
+                        {
+                            var idx = i;
+                            <div>
+                                <div class="mini-col-header">
+                                    <div class="ch-time">@Slots[idx].Time</div>
+                                    <div class="ch-period">@Slots[idx].Period</div>
+                                    <div class="ch-line"></div>
+                                </div>
+                                <div class="mini-cards-area">
+                                    @if (day.Slots.Count > idx && day.Slots[idx].Any())
+                                    {
+                                        @foreach (var card in day.Slots[idx])
+                                        {
+                                            <ActivityCard Card="@card" ShowSupervisorColumn="false" ShowSupervisorsAtTop="true" CurrentUserName="@Auth.CurrentUser?.Name" />
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <div class="cards-empty" style="padding:16px;font-size:13px;">Geen activiteiten</div>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            }
+            else
+            {
+                @for (int i = 0; i < Slots.Length; i++)
+                {
+                    var idx = i;
+                    <div>
+                        <div class="mini-col-header">
+                            <div class="ch-time">@Slots[idx].Time</div>
+                            <div class="ch-period">@Slots[idx].Period</div>
+                            <div class="ch-line"></div>
+                        </div>
+                        <div class="mini-cards-area"
+                             @ondragover:preventDefault
+                             @ondragover="() => { }"
+                             @ondrop="() => HandleSlotDrop(idx)">
+                            @if (_slots.Count > idx && _slots[idx].Any())
+                            {
+                                @for (int j = 0; j < _slots[idx].Count; j++)
+                                {
+                                    var cardIdx = j;
+                                    var card = _slots[idx][cardIdx];
+                                    var cardLocation = card.Location;
+                                    var cardSlot = idx;
+                                    var tagGame = "game";
+                                    var tagClient = "client";
+                                    var tagSupervisor = "supervisor";
+                                    <div class="@(IsDashboardCardDragging(cardLocation, cardSlot, cardIdx) ? "card-dragging" : "")"
+                                         draggable="@(!IsPastSelectedDay ? "true" : "false")"
+                                         @ondragstart="() => StartCardDrag(cardLocation, cardSlot, cardIdx)"
+                                         @ondragend="EndCardDrag"
+                                         @ondragover:preventDefault
+                                         @ondragover="() => { }"
+                                         @ondrop:stopPropagation
+                                         @ondrop="() => HandleCardDrop(cardSlot, cardLocation)">
+                                        <div class="activity-card">
+                                            <div class="card-main">
+                                                <div class="card-location">@card.Location</div>
+                                                <div class="card-divider-left"></div>
+                                                @if (card.Supers.Any())
+                                                {
+                                                    <div class="card-tags">
+                                                        @foreach (var sup in card.Supers)
+                                                        {
+                                                            var supVar = sup;
+                                                            <span class="tag @supVar.Type @(IsDashboardTagDragging(tagSupervisor, cardLocation, cardSlot, supVar.Name) ? "tag-dragging" : "")"
+                                                                  draggable="@(!IsPastSelectedDay ? "true" : "false")"
+                                                                  @ondragstart:stopPropagation
+                                                                  @ondragstart="() => StartTagDrag(tagSupervisor, cardLocation, cardSlot, supVar.Name)"
+                                                                  @ondragend="EndTagDrag">
+                                                                @supVar.Name
+                                                            </span>
+                                                        }
+                                                    </div>
+                                                    <div class="card-divider-left"></div>
+                                                }
+                                                <div class="card-tags">
+                                                    <span class="tag game @(IsDashboardTagDragging(tagGame, cardLocation, cardSlot, card.Title) ? "tag-dragging" : "")"
+                                                          draggable="@(!IsPastSelectedDay ? "true" : "false")"
+                                                          @ondragstart:stopPropagation
+                                                          @ondragstart="() => StartTagDrag(tagGame, cardLocation, cardSlot, card.Title)"
+                                                          @ondragend="EndTagDrag">
+                                                        @card.Title
+                                                    </span>
+                                                </div>
+                                                <div class="card-divider-left"></div>
+                                                <div class="card-tags">
+                                                    @foreach (var client in card.Clients)
+                                                    {
+                                                        var c = client;
+                                                        var isOwn = string.Equals(Auth.CurrentUser?.Name, c, StringComparison.OrdinalIgnoreCase);
+                                                        <span class="tag deelnemer @(isOwn ? "own-name" : "") @(IsDashboardTagDragging(tagClient, cardLocation, cardSlot, c) ? "tag-dragging" : "")"
+                                                              draggable="@(!IsPastSelectedDay ? "true" : "false")"
+                                                              @ondragstart:stopPropagation
+                                                              @ondragstart="() => StartTagDrag(tagClient, cardLocation, cardSlot, c)"
+                                                              @ondragend="EndTagDrag">
+                                                            @c
+                                                        </span>
+                                                    }
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <div class="cards-empty" style="padding:16px;font-size:13px;">Geen activiteiten</div>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+
+    <div class="editor-mode-fab">
+        <div class="toggle-label">Editor Mode</div>
+        <button class="detail-status-toggle @(Auth.CurrentUser?.EditorEnabled == true ? "active" : "inactive")"
+                type="button" @onclick="ToggleEditorMode">
+            @(Auth.CurrentUser?.EditorEnabled == true ? "Aan" : "Uit")
+        </button>
+    </div>
+</div>
+
+@code {
+    private static readonly (string Time, string Period)[] Slots =
+    [
+        ("10:00 - 11:00", "ochtend 1"),
+        ("11:30 - 12:15", "ochtend 2"),
+        ("13:00 - 14:00", "middag 1"),
+        ("14:30 - 15:30", "middag 2")
+    ];
+
+    private bool _showFullWeek;
+    private int _weekOffset;
+    private string _selectedDate = DateTime.Today.ToString("yyyy-MM-dd");
+    private List<DayData> _weekData = [];
+    private Dictionary<string, int> _locationOrder = new(StringComparer.OrdinalIgnoreCase);
+    private List<List<SlotCard>> _slots => _showFullWeek ? [] : (_weekData.FirstOrDefault(d => d.Date == _selectedDate)?.Slots ?? []);
+    private List<Absence> _todayAbsences => _weekData.FirstOrDefault(d => d.Date == _selectedDate)?.Absences ?? [];
+    private int _ziekCount => _todayAbsences.Count(a => a.Type == "ziek");
+    private int _vakantieCount => _todayAbsences.Count(a => a.Type == "vakantie");
+
+    private TagDrag? _tagDrag;
+    private CardDrag? _cardDrag;
+
+    private bool IsPastSelectedDay =>
+        DateOnly.TryParse(_selectedDate, out var d) && d < DateOnly.FromDateTime(DateTime.Today);
+
+    private class DayData
+    {
+        public string Date { get; set; } = "";
+        public string DayName { get; set; } = "";
+        public List<List<SlotCard>> Slots { get; set; } = [];
+        public List<Absence> Absences { get; set; } = [];
+        public DateTime? UpdatedAt { get; set; }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        AbsenceService.OnAbsenceChanged += OnAbsenceChanged;
+        await LoadWeek();
+    }
+
+    private async void OnAbsenceChanged()
+    {
+        await LoadWeek();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        AbsenceService.OnAbsenceChanged -= OnAbsenceChanged;
+    }
+
+    private async Task LoadWeek()
+    {
+        var builderData = await BuilderService.GetBuilderData();
+        _locationOrder = builderData.Locaties
+            .Select((l, i) => (l.Name, Index: i))
+            .ToDictionary(x => x.Name, x => x.Index, StringComparer.OrdinalIgnoreCase);
+        var locationOrder = _locationOrder;
+
+        var today = DateTime.Today;
+        int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+        var startOfWeek = today.AddDays(-1 * diff + _weekOffset * 7);
+
+        var tasks = new List<(DateTime Date, Task<DayPlan> Plan, Task<List<Absence>> Abs)>();
+        for (int i = 0; i < 5; i++)
+        {
+            var date = startOfWeek.AddDays(i);
+            var dateStr = date.ToString("yyyy-MM-dd");
+            tasks.Add((date, Cards.GetDayPlan(dateStr), AbsenceService.GetAbsences(dateStr)));
+        }
+
+        await Task.WhenAll(tasks.SelectMany(t => new Task[] { t.Plan, t.Abs }));
+
+        _weekData = [];
+        foreach (var t in tasks)
+        {
+            var plan = t.Plan.Result;
+            var slots = plan.PublishedAt is not null ? plan.Slots : Enumerable.Range(0, 4).Select(_ => new List<SlotCard>()).ToList();
+            foreach (var slot in slots)
+            {
+                slot.Sort((a, b) =>
+                {
+                    var aIdx = locationOrder.GetValueOrDefault(a.Location, int.MaxValue);
+                    var bIdx = locationOrder.GetValueOrDefault(b.Location, int.MaxValue);
+                    var cmp = aIdx.CompareTo(bIdx);
+                    if (cmp != 0) return cmp;
+                    return string.Compare(a.Location, b.Location, StringComparison.OrdinalIgnoreCase);
+                });
+            }
+
+            _weekData.Add(new DayData
+            {
+                Date = t.Date.ToString("yyyy-MM-dd"),
+                DayName = FormatDayName(t.Date),
+                Slots = slots,
+                Absences = t.Abs.Result,
+                UpdatedAt = plan.PublishedAt is not null ? plan.UpdatedAt : null
+            });
+        }
+
+        _selectedDate = _weekOffset == 0
+            ? DateTime.Today.ToString("yyyy-MM-dd")
+            : _weekData.FirstOrDefault()?.Date ?? DateTime.Today.ToString("yyyy-MM-dd");
+    }
+
+    private void ShowAbsenceDetail(Absence a)
+    {
+        var content = (RenderFragment)(builder =>
+        {
+            builder.OpenElement(0, "div");
+            builder.AddAttribute(1, "style", "margin-bottom: 16px; font-size: 14px; line-height: 1.5;");
+
+            builder.OpenElement(2, "div");
+            builder.AddAttribute(3, "style", "color: #888; margin-bottom: 4px;");
+            builder.AddContent(4, "Type:");
+            builder.CloseElement();
+            builder.OpenElement(5, "div");
+            builder.AddAttribute(6, "style", "font-weight: 500; margin-bottom: 12px; text-transform: capitalize;");
+            builder.AddContent(7, a.Type);
+            builder.CloseElement();
+
+            if (!string.IsNullOrEmpty(a.Reason))
+            {
+                builder.OpenElement(8, "div");
+                builder.AddAttribute(9, "style", "color: #888; margin-bottom: 4px;");
+                builder.AddContent(10, "Reden:");
+                builder.CloseElement();
+                builder.OpenElement(11, "div");
+                builder.AddAttribute(12, "style", "font-weight: 500; margin-bottom: 12px;");
+                builder.AddContent(13, a.Reason);
+                builder.CloseElement();
+            }
+
+            if (!string.IsNullOrEmpty(a.FromDate) && !string.IsNullOrEmpty(a.ToDate))
+            {
+                builder.OpenElement(14, "div");
+                builder.AddAttribute(15, "style", "color: #888; margin-bottom: 4px;");
+                builder.AddContent(16, "Periode:");
+                builder.CloseElement();
+                builder.OpenElement(17, "div");
+                builder.AddAttribute(18, "style", "font-weight: 500;");
+                builder.AddContent(19, $"{FormatDate(a.FromDate)} t/m {FormatDate(a.ToDate)}");
+                builder.CloseElement();
+            }
+            else
+            {
+                builder.OpenElement(20, "div");
+                builder.AddAttribute(21, "style", "color: #888; margin-bottom: 4px;");
+                builder.AddContent(22, "Datum:");
+                builder.CloseElement();
+                builder.OpenElement(23, "div");
+                builder.AddAttribute(24, "style", "font-weight: 500;");
+                builder.AddContent(25, FormatDate(a.Date));
+                builder.CloseElement();
+            }
+
+            builder.CloseElement();
+        });
+
+        var footerExtra = (RenderFragment)(builder =>
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "class", "mbtn beter-btn");
+            builder.AddAttribute(2, "type", "button");
+            builder.AddAttribute(3, "onclick", EventCallback.Factory.Create(this, () => BeterMelden(a)));
+            builder.AddContent(4, "Beter melden");
+            builder.CloseElement();
+        });
+
+        Modal.Open(new ModalOptions(
+            Title: a.Name,
+            HideInput: true,
+            HideCancel: true,
+            ConfirmLabel: "Sluiten",
+            Extra: content,
+            FooterExtra: footerExtra,
+            OnConfirm: _ =>
+            {
+                Modal.Close();
+                return Task.CompletedTask;
+            }
+        ));
+    }
+
+    private async Task BeterMelden(Absence a)
+    {
+        await AbsenceService.DeleteAbsence(a.Id);
+        Modal.Close();
+        Toast.Show($"{a.Name} is weer aanwezig gemeld");
+        await LoadWeek();
+        StateHasChanged();
+    }
+
+    private async Task ToggleEditorMode()
+    {
+        if (Auth.CurrentUser is null) return;
+        var newState = !Auth.CurrentUser.EditorEnabled;
+        Auth.CurrentUser.EditorEnabled = newState;
+        Auth.NotifyUserStateChanged();
+        await AccountService.UpdateEditorEnabled(Auth.CurrentUser.Id, newState);
+    }
+
+    private static string FormatDayName(DateTime date)
+    {
+        var days = new[] { "Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag" };
+        return days[(int)date.DayOfWeek];
+    }
+
+    private static string AbsenceTooltip(Absence a)
+    {
+        if (a.Type == "vakantie" && a.FromDate is not null && a.ToDate is not null)
+            return $"{FormatDate(a.FromDate)} – {FormatDate(a.ToDate)}";
+        if (a.Type == "anders" && a.Reason is not null)
+            return a.Reason;
+        return "";
+    }
+
+    private static string FormatDate(string date)
+    {
+        var months = new[] { "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec" };
+        if (DateTime.TryParse(date, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+        {
+            return $"{dt.Day} {months[dt.Month - 1]}";
+        }
+
+        // Fallback for cases like '09T22:00:00.000Z' if TryParse fails
+        var parts = date.Split('-');
+        if (parts.Length >= 3 && int.TryParse(parts[1], out var m) && int.TryParse(parts[2].Split('T')[0], out var d))
+        {
+            if (m >= 1 && m <= 12)
+                return $"{d} {months[m - 1]}";
+        }
+
+        return date;
+    }
+
+    private bool IsDashboardTagDragging(string type, string location, int slotIdx, string value) =>
+        _tagDrag is { } d
+        && d.Type == type
+        && d.SlotIdx == slotIdx
+        && string.Equals(d.SourceLocation, location, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(d.Value, value, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsDashboardCardDragging(string location, int slotIdx, int cardIdx) =>
+        _cardDrag is { } d
+        && d.SourceSlotIdx == slotIdx
+        && string.Equals(d.SourceLocation, location, StringComparison.OrdinalIgnoreCase)
+        && d.CardIdx == cardIdx;
+
+    private void StartTagDrag(string type, string location, int slotIdx, string value)
+    {
+        if (IsPastSelectedDay) return;
+        _tagDrag = new TagDrag(type, location, slotIdx, value);
+    }
+
+    private void EndTagDrag() => _tagDrag = null;
+
+    private void StartCardDrag(string location, int slotIdx, int cardIdx)
+    {
+        if (IsPastSelectedDay) return;
+        _cardDrag = new CardDrag(location, slotIdx, cardIdx);
+    }
+
+    private void EndCardDrag() => _cardDrag = null;
+
+    private async Task SaveAndRepublish()
+    {
+        var dayData = _weekData.FirstOrDefault(d => d.Date == _selectedDate);
+        if (dayData is null) return;
+        try
+        {
+            dayData.UpdatedAt = await Cards.SaveCards(_selectedDate, dayData.Slots, dayData.UpdatedAt);
+            await Cards.PublishCards(_selectedDate, null);
+        }
+        catch (PlanningConflictException ex)
+        {
+            Toast.Show(ex.Message);
+        }
+    }
+
+    private async Task DropTag(int targetSlotIdx, string targetLocation)
+    {
+        if (_tagDrag is null) return;
+        if (_tagDrag.Type is "client" or "supervisor")
+        {
+            var absent = _todayAbsences.Any(a =>
+                string.Equals(a.Name, _tagDrag.Value, StringComparison.OrdinalIgnoreCase));
+            if (absent)
+            {
+                Toast.Show($"{_tagDrag.Value} is afwezig en kan niet worden ingepland.");
+                _tagDrag = null;
+                return;
+            }
+        }
+        if (_tagDrag.Type is "client" or "supervisor")
+        {
+            var sourceCard = targetSlotIdx < _slots.Count
+                ? _slots[_tagDrag.SlotIdx].FirstOrDefault(c =>
+                    string.Equals(c.Location, _tagDrag.SourceLocation, StringComparison.OrdinalIgnoreCase))
+                : null;
+            if (sourceCard is not null)
+            {
+                if (_tagDrag.Type == "client" && !CardConstraints.CanRemoveClient(sourceCard))
+                {
+                    Toast.Show($"Kan {_tagDrag.Value} niet verplaatsen: de activiteit heeft maar één deelnemer.");
+                    _tagDrag = null;
+                    return;
+                }
+            }
+            var alreadyInTargetSlot = targetSlotIdx < _slots.Count && _slots[targetSlotIdx].Any(c =>
+                !(targetSlotIdx == _tagDrag.SlotIdx && string.Equals(c.Location, _tagDrag.SourceLocation, StringComparison.OrdinalIgnoreCase))
+                && (_tagDrag.Type == "client"
+                    ? c.Clients.Any(cl => string.Equals(cl, _tagDrag.Value, StringComparison.OrdinalIgnoreCase))
+                    : c.Supers.Any(s => string.Equals(s.Name, _tagDrag.Value, StringComparison.OrdinalIgnoreCase))));
+            if (alreadyInTargetSlot)
+            {
+                Toast.Show($"{_tagDrag.Value} staat al ingepland in dit tijdvak.");
+                _tagDrag = null;
+                return;
+            }
+        }
+        var dropped = _tagDrag.Type == "supervisor"
+            ? CalendarDragHelper.TryMoveSupervisorWithSwap(_slots, _tagDrag, targetSlotIdx, targetLocation)
+            : CalendarDragHelper.TryDropTagCrossSlot(_slots, _tagDrag, targetSlotIdx, targetLocation);
+        if (!dropped)
+        {
+            _tagDrag = null;
+            return;
+        }
+        _tagDrag = null;
+        StateHasChanged();
+        await SaveAndRepublish();
+    }
+
+    private async Task DropCard(int targetSlotIdx)
+    {
+        if (_cardDrag is null) return;
+        if (_cardDrag.SourceSlotIdx == targetSlotIdx) { _cardDrag = null; return; }
+
+        var sourceSlot = _slots[_cardDrag.SourceSlotIdx];
+        if (_cardDrag.CardIdx >= sourceSlot.Count) { _cardDrag = null; return; }
+
+        var card = sourceSlot[_cardDrag.CardIdx];
+        var targetSlot = _slots[targetSlotIdx];
+
+        var absentPerson = card.Clients
+            .Concat(card.Supers.Select(s => s.Name))
+            .FirstOrDefault(name => _todayAbsences.Any(a =>
+                string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase)));
+        if (absentPerson is not null)
+        {
+            Toast.Show($"{absentPerson} is afwezig en kan niet worden ingepland.");
+            _cardDrag = null;
+            return;
+        }
+
+        if (targetSlot.Any(c => c.Clients.Any(cl =>
+            card.Clients.Any(cc => string.Equals(cc, cl, StringComparison.OrdinalIgnoreCase)))))
+        {
+            Toast.Show("Een deelnemer is al ingepland op dit tijdstip.");
+            _cardDrag = null;
+            return;
+        }
+        if (targetSlot.Any(c => c.Supers.Any(s =>
+            card.Supers.Any(cs => string.Equals(cs.Name, s.Name, StringComparison.OrdinalIgnoreCase)))))
+        {
+            Toast.Show("Een begeleider is al ingepland op dit tijdstip.");
+            _cardDrag = null;
+            return;
+        }
+
+        sourceSlot.RemoveAt(_cardDrag.CardIdx);
+        targetSlot.Add(card);
+        targetSlot.Sort((a, b) =>
+        {
+            var aIdx = _locationOrder.GetValueOrDefault(a.Location, int.MaxValue);
+            var bIdx = _locationOrder.GetValueOrDefault(b.Location, int.MaxValue);
+            var cmp = aIdx.CompareTo(bIdx);
+            return cmp != 0 ? cmp : string.Compare(a.Location, b.Location, StringComparison.OrdinalIgnoreCase);
+        });
+        _cardDrag = null;
+        StateHasChanged();
+        await SaveAndRepublish();
+    }
+
+    private async Task HandleCardDrop(int targetSlotIdx, string targetLocation)
+    {
+        if (_tagDrag is not null)
+            await DropTag(targetSlotIdx, targetLocation);
+        else if (_cardDrag is not null)
+            await DropCard(targetSlotIdx);
+    }
+
+    private async Task HandleSlotDrop(int targetSlotIdx)
+    {
+        if (_cardDrag is not null)
+            await DropCard(targetSlotIdx);
+    }
+}

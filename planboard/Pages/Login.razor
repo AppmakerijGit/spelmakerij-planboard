@@ -1,0 +1,81 @@
+@page "/"
+@page "/login"
+@layout EmptyLayout
+@inject AuthService Auth
+@inject NavigationManager Nav
+
+<div id="screen-login" class="screen active">
+    <div class="login-card">
+        <div class="login-logo">
+            <div class="login-logo-badge">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                    <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                </svg>
+                <span>spelmakerij</span>
+            </div>
+        </div>
+        <p class="login-subtitle">Dagplanning voor begeleiders en deelnemers</p>
+        <div class="login-field">
+            <label class="login-label" for="loginUser">Gebruikersnaam</label>
+            <input class="login-input" id="loginUser" @bind="_username" @bind:event="oninput" @onchange="e => _username = e.Value?.ToString() ?? string.Empty"
+                   type="text" placeholder="gebruikersnaam" autocomplete="username" />
+        </div>
+        <div class="login-field">
+            <label class="login-label" for="loginPass">Wachtwoord</label>
+            <input class="login-input" id="loginPass" @bind="_password" @bind:event="oninput" @onchange="e => _password = e.Value?.ToString() ?? string.Empty" @onkeydown="OnKeyDown"
+                   type="password" placeholder="......" autocomplete="current-password" />
+        </div>
+        <div class="login-field login-remember">
+            <input type="checkbox" id="rememberMe" @bind="_rememberMe" />
+            <label for="rememberMe">Onthouden</label>
+        </div>
+        @if (!string.IsNullOrEmpty(_error))
+        {
+            <div class="login-error">@_error</div>
+        }
+        <button class="login-btn" type="button" @onclick="DoLogin">Inloggen</button>
+    </div>
+</div>
+
+@code {
+    private string _username = "";
+    private string _password = "";
+    private string _error = "";
+    private bool _rememberMe;
+    private bool _loading;
+
+    protected override void OnInitialized()
+    {
+        if (Auth.CurrentUser is not null)
+            Nav.NavigateTo(Auth.CurrentUser.Role is "deelnemer" or "vrijwilliger" ? "/home" : "/dashboard", replace: true);
+    }
+
+    private async Task DoLogin()
+    {
+        if (_loading) return;
+
+        if (string.IsNullOrWhiteSpace(_username) || string.IsNullOrWhiteSpace(_password))
+        {
+            _error = "Vul gebruikersnaam en wachtwoord in.";
+            return;
+        }
+
+        _loading = true;
+        _error = "";
+
+        var success = await Auth.Login(_username, _password, _rememberMe);
+        if (success)
+            Nav.NavigateTo(Auth.CurrentUser!.Role is "deelnemer" or "vrijwilliger" ? "/home" : "/dashboard");
+        else
+            _error = "Gebruikersnaam of wachtwoord is onjuist.";
+
+        _loading = false;
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await DoLogin();
+    }
+}
